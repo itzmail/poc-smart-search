@@ -59,38 +59,32 @@ Sistem ini mendukung arsitektur **Dual-Engine**:
                    └─────────────────────────────────────────┘
 ```
 
-### Sequence Diagram Alur Kerja Smart Search (Sederhana & Mudah Dipahami)
-
-Diagram ini menjelaskan alur kerja dari sudut pandang interaksi nyata: **Pengguna mengetik ➔ Sistem memahami maksud ➔ Cek hak akses ➔ Ambil data ➔ Tampilkan opsi tindakan**.
+### Sequence Diagram Alur Kerja Smart Search
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as 👤 Pengguna (Guru / Staf)
-    participant SearchBar as 🔍 Search Bar Aplikasi
-    participant Memori as ⚡ Memori Cepat (Cache)
-    participant OtakAI as 🧠 Otak AI (Paham Bahasa)
-    participant IzinAkses as 🛡️ Hak Akses (Role Guru)
-    participant Database as 🗄️ Database Sekolah
+    actor User as 👤 User
+    participant Search as 🔍 Input Search
+    participant Redis as ⚡ Redis (Cache)
+    participant AI as 🧠 JEV / Laya
+    participant DB as 🗄️ Database
 
-    User->>SearchBar: Ketik: "Anak Siti ada di kelas mana?"
+    User->>Search: Ketik: "Anak Siti ada di kelas mana?"
+    Search->>Redis: Cek hasil pencarian sebelumnya
     
-    SearchBar->>Memori: Cek: "Pernah ada yang cari ini sebelumnya?"
-    alt Sudah Pernah Dicari (Langsung Cepat)
-        Memori-->>SearchBar: Ambil jawaban dari memori (< 1 milidetik)
-        SearchBar-->>User: Tampilkan Opsi: Buka Ruang Kelas Siti (Kelas 8B)
-    else Belum Pernah (Proses Baru)
-        SearchBar->>OtakAI: Tanya AI: "Apa maksud pertanyaan user ini?"
-        OtakAI-->>SearchBar: Maksud User: "Ingin buka halaman detail ruang kelas"
+    alt Sudah ada di Redis (Cache Hit)
+        Redis-->>Search: Ambil jawaban instan (< 1 milidetik)
+        Search-->>User: Tampilkan Opsi: Ruang Kelas 8B & Profil Siti
+    else Belum ada di Redis (Cache Miss)
+        Search->>AI: Kirim query untuk tebak maksud/intent
+        AI-->>Search: Maksud: Buka Halaman Kelas (DIRECT_LINK)
         
-        SearchBar->>Database: Cari: "Siapa siswa bernama Siti & di mana kelasnya?"
-        Database-->>SearchBar: Ditemukan: Siti Rahma (Kelas 8B / ID: K-08B)
+        Search->>DB: Cari data anak bernama Siti & kelasnya
+        DB-->>Search: Ditemukan: Siti Rahma (Kelas 8B / ID: K-08B)
         
-        SearchBar->>IzinAkses: Cek: "Apakah Guru boleh lihat kelas & keuangan Siti?"
-        IzinAkses-->>SearchBar: Boleh lihat Kelas & Siswa (Modul Tagihan Uang DIBLOKIR)
-        
-        SearchBar->>Memori: Simpan hasil ini di memori (agar pencarian berikutnya instan)
-        SearchBar-->>User: Tampilkan Pilihan:<br/>1. Buka Ruang Kelas 8B (Kelas Siti)<br/>2. Buka Profil Biodata Siti Rahma
+        Search->>Redis: Simpan hasil ke Redis (TTL 30 menit)
+        Search-->>User: Tampilkan Pilihan:<br/>1. Ruang Kelas 8B (Kelas Siti)<br/>2. Profil Biodata Siti Rahma
     end
 ```
 
