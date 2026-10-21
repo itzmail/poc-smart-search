@@ -4,6 +4,7 @@ import { classifyIntent } from "./classifier.js";
 import { extractParams } from "./extractor.js";
 import { dispatchAction } from "./dispatcher.js";
 import { printSearchProcess } from "./visualizer.js";
+import { getActiveRoutes } from "./routes-sync.js";
 
 async function main() {
   console.clear();
@@ -68,9 +69,12 @@ async function main() {
       }
 
       try {
-        const classification = await classifyIntent(q, currentEngine);
+        const [classification, routes] = await Promise.all([
+          classifyIntent(q, currentEngine),
+          getActiveRoutes(),
+        ]);
         const params = extractParams(q);
-        const response = dispatchAction(q, classification, params);
+        const response = dispatchAction(q, classification, params, routes);
         printSearchProcess(q, classification, params, response);
       } catch (err: any) {
         console.error(pc.red(`Error: ${err.message}`));

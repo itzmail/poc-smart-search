@@ -1,5 +1,6 @@
 import type { ClassificationResult, IntentType } from "./classifier.js";
 import type { ExtractedParams } from "./extractor.js";
+import { type AppRoute } from "./routes-sync.js";
 
 export interface MenuCard {
   id: string;
@@ -7,7 +8,6 @@ export interface MenuCard {
   description: string;
   path: string;
   icon: string;
-  badge?: string;
 }
 
 export interface SmartSearchResponse {
@@ -16,6 +16,7 @@ export interface SmartSearchResponse {
   confidence: number;
   engine: "JEV_CLOUD" | "LAYA_LOCAL";
   latency_ms: number;
+  cached?: boolean;
   extracted_params: ExtractedParams;
   result:
     | {
@@ -42,64 +43,40 @@ export interface SmartSearchResponse {
       };
 }
 
-const STATIC_MENUS: MenuCard[] = [
-  {
-    id: "menu-dashboard",
-    title: "Dashboard Utama",
-    description: "Statistik ringkas sekolah, kehadiran, dan keuangan",
-    path: "/dashboard",
-    icon: "layout-dashboard",
-  },
-  {
-    id: "menu-siswa",
-    title: "Master Data Siswa",
-    description: "Daftar biodata siswa per rombel dan status aktif",
-    path: "/siswa",
-    icon: "users",
-  },
-  {
-    id: "menu-nilai",
-    title: "Penilaian Akademik",
-    description: "Input dan rekap nilai mata pelajaran per semester",
-    path: "/nilai",
-    icon: "award",
-  },
-  {
-    id: "menu-spp",
-    title: "Pembayaran & Tagihan SPP",
-    description: "Data tunggakan dan verifikasi pembayaran SPP",
-    path: "/spp",
-    icon: "credit-card",
-  },
-  {
-    id: "menu-rapot",
-    title: "Cetak & Distribusi Rapot",
-    description: "Pusat pencetakan buku rapor dan e-rapor siswa",
-    path: "/rapot",
-    icon: "file-text",
-  },
-];
-
 export function dispatchAction(
   query: string,
   classification: ClassificationResult,
-  params: ExtractedParams
+  params: ExtractedParams,
+  dynamicRoutes: AppRoute[] = []
 ): SmartSearchResponse {
   const { intent, confidence, engine, latency_ms } = classification;
+  const qLower = query.toLowerCase();
 
+  // 1. SCENARIO 1: LIST_MENU (Daftar Menu Dinamis dari Cache App)
   if (intent === "LIST_MENU") {
-    const qLower = query.toLowerCase();
-    // Prioritaskan menu sesuai keyword domain
-    let matched = STATIC_MENUS;
-    if (qLower.includes("spp") || qLower.includes("bayar") || qLower.includes("uang")) {
-      matched = STATIC_MENUS.filter((m) => m.id === "menu-spp" || m.id === "menu-dashboard");
-    } else if (qLower.includes("nilai") || qLower.includes("akademik") || qLower.includes("mapel")) {
-      matched = STATIC_MENUS.filter((m) => m.id === "menu-nilai" || m.id === "menu-rapot");
-    } else if (qLower.includes("rapot") || qLower.includes("rapor")) {
-      matched = STATIC_MENUS.filter((m) => m.id === "menu-rapot" || m.id === "menu-nilai");
-    } else if (qLower.includes("siswa") || qLower.includes("murid")) {
-      matched = STATIC_MENUS.filter((m) => m.id === "menu-siswa" || m.id === "menu-dashboard");
+    let matchedRoutes = dynamicRoutes.filter((r) =>
+      r.keywords.some((k) => qLower.includes(k.toLowerCase())) ||
+      r.title.toLowerCase().includes(qLower)
+    );
+
+    // Jika tidak ada keyword spesifik, tampilkan route dashboard + lainnya
+    if (matchedRoutes.length === 0) {
+      matchedRoutes = dynamicRoutes.slice(0, 3);
+    } else {
+      // Selalu sertakan dashboard jika ada menu terkait
+      const dashboardRoute = dynamicRoutes.find((r) => r.id === "dashboard");
+      if (dashboardRoute && !matchedRoutes.some((m) => m.id === "dashboard")) {
+        matchedRoutes.unshift(dashboardRoute);
+      }
     }
+
+    const matched_menus: MenuCard[] = matchedRoutes.map((r) => ({
+      id: `menu-${r.id}`,
+      title: r.title,
+      description: r.description,
+      path: r.path,
+      icon: r.id === "spp" ? "credit-card" : r.id === "siswa" ? "users" : r.id === "nilai" ? "award" : r.id === "rapot" ? "file-text" : "layout-dashboard",
+    }));
 
     return {
       query,
@@ -110,40 +87,56 @@ export function dispatchAction(
       extracted_params: params,
       result: {
         mode: "LIST_MENU",
-        matched_menus: matched,
+        matched_menus,
       },
     };
   }
 
+  // 2. SCENARIO 2: DIRECT_LINK (URL Dinamis Berdasarkan Filter & Route Manifest)
   if (intent === "DIRECT_LINK") {
-    const qLower = query.toLowerCase();
-    const queryParams = new URLSearchParams();
-    let basePath = "/siswa";
-    let title = "Data Siswa";
+    // Cari route terbaik yang mendukung DIRECT_LINK dengan skor kecocokan tertinggi
+    const candidateRoutes = dynamicRoutes.filter((r) => r.supported_intents.includes("DIRECT_LINK"));
+    let selectedRoute = candidateRoutes.find((r) => r.id === "siswa") || dynamicRoutes[0];
+    let maxScore = 0;
 
-    if (qLower.includes("spp") || qLower.includes("nunggak") || qLower.includes("tagihan") || qLower.includes("lunas")) {
-      basePath = "/spp";
-      title = "Data Tagihan & Pembayaran SPP";
+    for (const r of candidateRoutes) {
+      let score = 0;
+      for (const k of r.keywords) {
+        if (qLower.includes(k.toLowerCase())) {
+          // Bobot lebih tinggi untuk domain spesifik (keuangan/nilai) dibanding kata umum "siswa"
+          score += ["nunggak", "tagihan", "spp", "bayar", "nilai", "ulangan", "akademik"].includes(k.toLowerCase()) ? 5 : 1;
+        }
+      }
+      if (score > maxScore) {
+        maxScore = score;
+        selectedRoute = r;
+      }
+    }
+
+    const queryParams = new URLSearchParams();
+    const filterObj: Record<string, string> = {};
+
+    // Petakan parameter yang diekstrak sesuai filter_keys milik route
+    if (selectedRoute.id === "spp") {
       if (params.status) queryParams.set("status", params.status);
       if (params.kelas) queryParams.set("kelas", params.kelas);
-    } else if (qLower.includes("nilai") || qLower.includes("ujian") || qLower.includes("mapel")) {
-      basePath = "/nilai";
-      title = "Rekap Nilai Siswa";
+    } else if (selectedRoute.id === "nilai") {
       if (params.kelas) queryParams.set("kelas", params.kelas);
       if (params.semester) queryParams.set("semester", params.semester);
       if (params.mapel) queryParams.set("mapel", params.mapel);
     } else {
+      // Siswa / General
       if (params.kelas) queryParams.set("kelas", params.kelas);
       if (params.status) queryParams.set("status", params.status);
       if (params.nama) queryParams.set("q", params.nama);
     }
 
-    const qs = queryParams.toString();
-    const target_url = qs ? `${basePath}?${qs}` : basePath;
-    const filterObj: Record<string, string> = {};
     queryParams.forEach((val, key) => {
       filterObj[key] = val;
     });
+
+    const qs = queryParams.toString();
+    const target_url = qs ? `${selectedRoute.path}?${qs}` : selectedRoute.path;
 
     return {
       query,
@@ -154,27 +147,24 @@ export function dispatchAction(
       extracted_params: params,
       result: {
         mode: "DIRECT_LINK",
-        title: `${title}${params.kelas ? ` - Kelas ${params.kelas}` : ""}`,
+        title: `${selectedRoute.title}${params.kelas ? " - Kelas " + params.kelas : ""}`,
         target_url,
         filters: filterObj,
       },
     };
   }
 
-  // REPORT_ACTION
+  // 3. SCENARIO 3: REPORT_ACTION (Aksi Download / Print Dokumen)
+  const isPrint = qLower.includes("cetak") || qLower.includes("print");
+  const actionType = isPrint ? "PRINT_RAPOT" : "DOWNLOAD_RAPOT";
+
   const dlParams = new URLSearchParams();
   if (params.kelas) dlParams.set("kelas", params.kelas);
   if (params.semester) dlParams.set("semester", params.semester);
-  dlParams.set("format", params.format || "pdf");
+  if (params.format) dlParams.set("format", params.format);
   if (params.nama) dlParams.set("nama", params.nama);
 
-  const titleDesc = [
-    params.nama ? `Siswa ${params.nama}` : "",
-    params.kelas ? `Kelas ${params.kelas}` : "",
-    params.semester ? `Semester ${params.semester}` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const download_url = `/api/rapot/download?${dlParams.toString()}`;
 
   return {
     query,
@@ -185,9 +175,9 @@ export function dispatchAction(
     extracted_params: params,
     result: {
       mode: "REPORT_ACTION",
-      action: params.format === "print" ? "PRINT_RAPOT" : "DOWNLOAD_RAPOT",
-      title: `Cetak / Unduh Rapot ${titleDesc ? `(${titleDesc})` : "Siswa"}`,
-      download_url: `/api/rapot/download?${dlParams.toString()}`,
+      action: actionType,
+      title: `Cetak / Unduh Rapot (${params.kelas ? "Kelas " + params.kelas : "Semua Kelas"}${params.semester ? " Semester " + params.semester : ""})`,
+      download_url,
       params: {
         kelas: params.kelas,
         semester: params.semester,

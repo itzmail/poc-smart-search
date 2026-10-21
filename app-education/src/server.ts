@@ -8,6 +8,55 @@ initDatabase();
 const PORT = parseInt(process.env.APP_PORT || "3000", 10);
 const SEARCH_SERVICE_URL = process.env.SEARCH_SERVICE_URL || "http://127.0.0.1:4000";
 
+// Single Source of Truth untuk Manifest Fitur & Route Aplikasi Sekolah
+export const APP_ROUTES_MANIFEST = [
+  {
+    id: "dashboard",
+    title: "Dashboard Utama",
+    path: "/dashboard",
+    description: "Statistik umum sekolah, total siswa, dan ringkasan pembayaran",
+    keywords: ["home", "beranda", "dashboard", "utama", "statistik"],
+    supported_intents: ["LIST_MENU"],
+    filter_keys: [],
+  },
+  {
+    id: "siswa",
+    title: "Master Data Siswa",
+    path: "/siswa",
+    description: "Daftar data induk siswa, profil murid, filter kelas dan status",
+    keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
+    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
+    filter_keys: ["kelas", "status", "q"],
+  },
+  {
+    id: "nilai",
+    title: "Penilaian Akademik Siswa",
+    path: "/nilai",
+    description: "Buku nilai siswa, rekap nilai harian, PTS, PAS, per mata pelajaran",
+    keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
+    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
+    filter_keys: ["kelas", "semester", "mapel"],
+  },
+  {
+    id: "spp",
+    title: "Pembayaran & Tagihan SPP",
+    path: "/spp",
+    description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah, kas keuangan",
+    keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan"],
+    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
+    filter_keys: ["status", "kelas"],
+  },
+  {
+    id: "rapot",
+    title: "Cetak & Distribusi Rapot",
+    path: "/rapot",
+    description: "Aksi cetak dokumen rapor, unduh PDF rapor per siswa atau per kelas",
+    keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
+    supported_intents: ["LIST_MENU", "REPORT_ACTION"],
+    filter_keys: ["kelas", "semester", "format", "nama"],
+  },
+];
+
 function sendJson(res: http.ServerResponse, statusCode: number, data: any) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json",
@@ -20,6 +69,17 @@ const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || "/", `http://localhost:${PORT}`);
   const pathname = parsedUrl.pathname;
   const qParams = parsedUrl.searchParams;
+
+  // 0. Dynamic Route Manifest Endpoint (Single Source of Truth untuk Service Search)
+  if (pathname === "/api/routes" || pathname === "/routes") {
+    console.log(pc.dim(`[APP] Manifest routes diakses oleh service search`));
+    return sendJson(res, 200, {
+      service: "app-education",
+      version: "1.0.0",
+      total_routes: APP_ROUTES_MANIFEST.length,
+      routes: APP_ROUTES_MANIFEST,
+    });
+  }
 
   // 1. Dashboard Module - Query agregasi langsung dari SQLite
   if (pathname === "/api/dashboard" || pathname === "/dashboard") {
@@ -225,6 +285,7 @@ server.listen(PORT, () => {
   console.log(`\n🏫 [App Pendidikan Backend + SQLite] running on http://127.0.0.1:${PORT}`);
   console.log(`📁 Database: education.db (SQLite)`);
   console.log(`📡 Endpoints:`);
+  console.log(`   • GET /api/routes (Dynamic Route Manifest)`);
   console.log(`   • GET /api/dashboard`);
   console.log(`   • GET /api/siswa?kelas=8B&status=aktif`);
   console.log(`   • GET /api/nilai?kelas=8B&semester=ganjil`);

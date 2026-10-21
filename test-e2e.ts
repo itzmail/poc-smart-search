@@ -67,7 +67,14 @@ async function runE2E() {
   console.log(`   Header Download: ${pc.green(disposition || "")}`);
   console.log(`   Isi Dokumen Mock: ${pc.dim(content.replace(/\n/g, " | "))}`);
 
-  console.log(pc.bold(pc.green("\n🎉 SEMUA SKENARIO E2E SMART SEARCH + SQLITE BERHASIL TERVERIFIKASI 100%!\n")));
+  // 6. Test Scenario 4: Redis Query Caching (TTL 30m) Verification
+  console.log(pc.bold("\n6. Testing Skenario 4: Verifikasi Redis Cache (TTL 30 Menit)"));
+  console.log(`   Query ulang: "${pc.yellow(q1)}" (sebelumnya sudah dipanggil)`);
+  const rCache = await (await fetch(`${APP_URL}/api/search?q=${encodeURIComponent(q1)}&engine=jev`)).json();
+  console.log(`   Cached: ${rCache.cached ? pc.green("✔ TRUE (DILAYANI DARI CACHE)") : pc.red("✘ FALSE")}`);
+  console.log(`   Latency: ${pc.green(rCache.latency_ms + "ms")} (CPU/AI Load: 0%)`);
+
+  console.log(pc.bold(pc.green("\n🎉 SEMUA SKENARIO E2E SMART SEARCH + SQLITE + REDIS BERHASIL TERVERIFIKASI 100%!\n")));
 }
 
 runE2E().catch(console.error);

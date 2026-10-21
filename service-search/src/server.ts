@@ -1,10 +1,16 @@
 import * as http from "node:http";
+import pc from "picocolors";
 import { classifyIntent } from "./classifier.js";
 import { extractParams } from "./extractor.js";
-import { dispatchAction } from "./dispatcher.js";
+import { dispatchAction, type SmartSearchResponse } from "./dispatcher.js";
 import { printSearchProcess } from "./visualizer.js";
+import { cacheGet, cacheSet, DEFAULT_TTL_SECONDS, getCacheStatus } from "./cache/redis.js";
+import { getActiveRoutes } from "./routes-sync.js";
 
 const PORT = parseInt(process.env.SEARCH_PORT || "4000", 10);
+
+// Inisialisasi awal cache routes dari App Pendidikan
+getActiveRoutes().catch(() => {});
 
 const server = http.createServer(async (req, res) => {
   // CORS
@@ -20,9 +26,31 @@ const server = http.createServer(async (req, res) => {
 
   const parsedUrl = new URL(req.url || "/", `http://localhost:${PORT}`);
 
+  // Health check & cache diagnostics
   if (parsedUrl.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "smart-search-engine" }));
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        service: "smart-search-engine",
+        cache: getCacheStatus(),
+      })
+    );
+    return;
+  }
+
+  // Refresh dynamic route manifest on demand (Webhook / Manual trigger)
+  if (parsedUrl.pathname === "/routes/refresh" && req.method === "POST") {
+    const refreshed = await getActiveRoutes(true);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        status: "success",
+        message: "Dynamic routes refreshed into Redis cache",
+        total_routes: refreshed.length,
+        routes: refreshed.map((r) => r.path),
+      })
+    );
     return;
   }
 
@@ -49,19 +77,49 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (!query.trim()) {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Parameter 'q' or 'query' is required" }));
       return;
     }
 
+    const normalizedKey = `smartsearch:q:${engine}:${trimmedQuery.toLowerCase()}`;
+
+    // 1. CEK QUERY RESULT CACHE DI REDIS (TTL 30 Menit)
+    const cachedResultStr = await cacheGet(normalizedKey);
+    if (cachedResultStr) {
+      try {
+        const cachedResponse: SmartSearchResponse = JSON.parse(cachedResultStr);
+        cachedResponse.cached = true;
+        cachedResponse.latency_ms = 0.8; // Instant hit from cache
+
+        console.log(pc.green(`⚡ [REDIS CACHE HIT (TTL 30m)] Query: "${trimmedQuery}" -> Latency < 1ms`));
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(cachedResponse, null, 2));
+        return;
+      } catch {}
+    }
+
+    // 2. QUERY BELUM DI CACHE: Jalankan Klasifikasi AI + Parameter Extraction
     try {
-      const classification = await classifyIntent(query, engine);
-      const params = extractParams(query);
-      const response = dispatchAction(query, classification, params);
+      const startTime = performance.now();
+      const [classification, dynamicRoutes] = await Promise.all([
+        classifyIntent(trimmedQuery, engine),
+        getActiveRoutes(),
+      ]);
+
+      const params = extractParams(trimmedQuery);
+      const response = dispatchAction(trimmedQuery, classification, params, dynamicRoutes);
+      response.latency_ms = Math.round((performance.now() - startTime) * 100) / 100;
+      response.cached = false;
+
+      // Simpan hasil ke Redis dengan TTL 30 Menit (1800 detik)
+      await cacheSet(normalizedKey, JSON.stringify(response), DEFAULT_TTL_SECONDS);
 
       // Print visualizer log in terminal
-      printSearchProcess(query, classification, params, response);
+      printSearchProcess(trimmedQuery, classification, params, response);
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(response, null, 2));
@@ -78,9 +136,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🚀 [Smart Search Engine] running on http://127.0.0.1:${PORT}`);
+  console.log(`\n🚀 [Smart Search Engine + Redis Cache] running on http://127.0.0.1:${PORT}`);
+  console.log(`⚡ Query Cache: TTL 30 Menit (${DEFAULT_TTL_SECONDS}s) via Redis`);
   console.log(`📡 Endpoints:`);
   console.log(`   • GET /resolve?q=query&engine=auto|jev|laya`);
   console.log(`   • POST /resolve (body: { q: string, engine?: string })`);
+  console.log(`   • POST /routes/refresh (Bust & re-fetch dynamic routes)`);
   console.log(`   • GET /health\n`);
 });

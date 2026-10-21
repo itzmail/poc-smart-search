@@ -2,6 +2,7 @@ import pc from "picocolors";
 import { classifyIntent, type IntentType } from "./classifier.js";
 import { extractParams } from "./extractor.js";
 import { dispatchAction } from "./dispatcher.js";
+import { getActiveRoutes } from "./routes-sync.js";
 
 interface TestCase {
   query: string;
@@ -45,6 +46,8 @@ async function runBenchmarkForEngine(engineName: "jev" | "laya") {
   // Warmup
   await classifyIntent("warmup test", engineName);
 
+  const dynamicRoutes = await getActiveRoutes();
+
   let correctCount = 0;
   const latencies: number[] = [];
 
@@ -52,7 +55,7 @@ async function runBenchmarkForEngine(engineName: "jev" | "laya") {
     const tc = TEST_CASES[i];
     const classification = await classifyIntent(tc.query, engineName);
     const params = extractParams(tc.query);
-    const response = dispatchAction(tc.query, classification, params);
+    const response = dispatchAction(tc.query, classification, params, dynamicRoutes);
 
     const isMatch = classification.intent === tc.expected;
     if (isMatch) correctCount++;
