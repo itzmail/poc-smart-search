@@ -265,61 +265,31 @@ curl "http://127.0.0.1:3000/api/search?q=lihat%20siswa%20nunggak%20kelas%208B&en
 
 ---
 
-## 8. Tracing Alur Eksekusi Kode: Dari Input ke Tindakan
+## 8. Tracing Alur Eksekusi: Dari Input ke Tindakan
 
-Diagram alur berikut menjelaskan bagaimana sistem memproses pencarian terfilter seperti *"lihat siswa nunggak kelas 8B"*:
+Tabel ringkas berikut merangkum proses dari saat pengguna mengetik hingga data tampil:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as 👤 Pengguna
-    participant App as 📱 Aplikasi Sekolah
-    participant AI as 🧠 AI Paham Bahasa
-    participant Filter as 🏷️ Penarik Kata Kunci
-    participant DB as 🗄️ Database Sekolah
-
-    User->>App: Ketik: "Lihat siswa nunggak kelas 8B"
-    
-    App->>AI: Tanya: "Pengguna mau buka menu atau filter data?"
-    AI-->>App: "Pengguna mau lihat tabel data terfilter (DIRECT_LINK)"
-    
-    App->>Filter: Ambil kata kunci filter dari kalimat
-    Filter-->>App: Didapat: Kelas = "8B" & Status = "Nunggak"
-    
-    App->>DB: Ambil data siswa nunggak di kelas 8B
-    DB-->>App: Ditemukan 2 siswa (Budi & Farhan)
-    
-    App-->>User: Buka Halaman Tagihan SPP Kelas 8B (Filter Nunggak Aktif)
-```
+| Tahap | Apa yang Dilakukan | Contoh Nyata |
+|---|---|---|
+| **1. Pahami Maksud** | Otak AI membaca bahasa alami pengguna | *"lihat siswa nunggak kelas 8B"* ➔ Terdeteksi ingin buka tabel data terfilter (`DIRECT_LINK`) |
+| **2. Tarik Kata Kunci** | Sistem menyaring kata penting secara otomatis | Didapat parameter: `kelas = "8B"` dan `status = "nunggak"` |
+| **3. Susun Link Aksi** | Sistem meracik link tujuan yang aman sesuai role | URL tujuan: `/spp?status=nunggak&kelas=8B` |
+| **4. Ambil Data Nyata** | Database mengeksekusi data siswa terkait | Ditemukan 2 siswa nunggak (Budi Santoso & Farhan Nugraha) |
 
 ---
 
 ## 9. Skalabilitas Tinggi: Memori Cepat (Cache) Menahan Ribuan User
 
-Untuk mendukung **ribuan pengguna mencari secara bersamaan**, sistem memakai memori cepat (Cache) agar server tidak berat dan tidak bolak-balik memanggil AI:
+Untuk mendukung **ribuan pengguna mencari secara bersamaan**, sistem memakai memori cepat (Cache) agar server tetap ringan dan tidak bolak-balik memanggil AI:
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Users as 👥 Ribuan Pengguna Bersamaan
-    participant Sistem as ⚡ Sistem Search
-    participant Memori as 💾 Memori Cepat (Cache)
-    participant AI as 🧠 Otak AI
-
-    Users->>Sistem: Kirim Pencarian
-    Sistem->>Memori: Cek: "Apakah kata kunci ini sudah ada di memori?"
-    
-    alt Skenario 1: Sudah Ada (~80% Pencarian Umum)
-        Memori-->>Sistem: Ambil jawaban langsung dari memori
-        Note over Sistem,Memori: Kecepatan Kilat (< 1 milidetik) | Beban Server 0%
-        Sistem-->>Users: Tampilkan Jawaban Seketika
-    else Skenario 2: Belum Ada (Pertanyaan Baru)
-        Memori-->>Sistem: Belum ada
-        Sistem->>AI: Panggil AI untuk memahami maksud kalimat
-        AI-->>Sistem: AI memberikan arti kalimat
-        Sistem->>Memori: Simpan jawaban di memori selama 30 menit
-        Sistem-->>Users: Tampilkan Jawaban
-    end
+flowchart LR
+    A[Pencarian Masuk] --> B{Ada di Memori Cepat?}
+    B -- Ya (~80% Pencarian Umum) --> C[Ambil dari Memori<br/>⚡ Cepat &lt; 1 ms | Biaya $0]
+    B -- Tidak (Pertanyaan Baru) --> D[Tanya Otak AI<br/>🧠 Proses Bahasa ~280ms]
+    D --> E[Simpan di Memori 30 Menit]
+    C --> F[Tampilkan ke Pengguna]
+    E --> F
 ```
 
 ### 1. Dynamic Route Manifest Sync (Zero-Hardcoded Routes)
