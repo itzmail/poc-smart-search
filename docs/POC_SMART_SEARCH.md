@@ -294,72 +294,47 @@ curl "http://127.0.0.1:3000/api/search?q=lihat%20siswa%20nunggak%20kelas%208B&en
 
 Berikut adalah urutan riil pemanggilan fungsi, HTTP endpoint, dan query database ketika pengguna mengetik search query:
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Pengguna / Browser
+    participant Gateway as App Gateway (:3000)<br/>(app-education/server.ts)
+    participant Classifier as Classifier (:4000)<br/>(classifier.ts)
+    participant JEV as TypeSafe JEV Cloud<br/>(api.typesafe.ai)
+    participant Extractor as Slot Extractor<br/>(extractor.ts)
+    participant Dispatcher as Dispatcher Engine<br/>(dispatcher.ts)
+    participant SQLite as SQLite DB<br/>(education.db)
+
+    User->>Gateway: GET /api/search?q="lihat siswa nunggak kelas 8B"
+    Gateway->>Classifier: Forward Query ke /resolve (:4000)
+    
+    rect rgb(240, 248, 255)
+        note over Classifier,JEV: Step 1: Classification Engine
+        Classifier->>JEV: POST /v1/systemone<br/>Payload: { state: query, criteria: { LIST_MENU, DIRECT_LINK, REPORT_ACTION } }
+        JEV-->>Classifier: Response: { intent: "DIRECT_LINK", confidence: 1.0 }
+    end
+
+    rect rgb(255, 250, 240)
+        note over Classifier,Extractor: Step 2: Slot / Parameter Extraction
+        Classifier->>Extractor: extractParams("lihat siswa nunggak kelas 8B")
+        Extractor-->>Classifier: Slots: { kelas: "8B", status: "nunggak" }
+    end
+
+    rect rgb(245, 255, 245)
+        note over Classifier,Dispatcher: Step 3: Action Dispatching
+        Classifier->>Dispatcher: dispatchAction(intent, slots, routes)
+        Dispatcher-->>Classifier: Action: DIRECT_LINK ➔ "/spp?status=nunggak&kelas=8B"
+        Classifier-->>Gateway: Return Search Response JSON
+    end
+
+    rect rgb(255, 240, 245)
+        note over Gateway,SQLite: Step 4: Query Database SQLite
+        User->>Gateway: GET /api/spp?status=nunggak&kelas=8B
+        Gateway->>SQLite: SELECT * FROM spp WHERE status='nunggak' AND kelas='8B'
+        SQLite-->>Gateway: 2 Record (Budi Santoso & Farhan Nugraha)
+        Gateway-->>User: 200 OK Response Data
+    end
 ```
-[User Input] "lihat siswa nunggak kelas 8B"
-     │
-     ▼
-[Step 1: Classification Engine]
-  ↳ File: service-search/src/classifier.ts
-  ↳ Memilih engine (JEV / Laya):
-      • JEV Cloud (Primary):
-        POST https://api.typesafe.ai/v1/systemone
-        Headers: Authorization: Bearer $TYPESAFE_API_KEY
-        Payload: {
-          "model": "jev-latest",
-          "context": "User query: \"lihat siswa nunggak kelas 8B\"",
-          "schema": {
-            "intent": {
-              "type": "choice",
-              "criteria": {
-                "LIST_MENU": "Navigasi menu umum",
-                "DIRECT_LINK": "Filter data tabel spesifik",
-                "REPORT_ACTION": "Cetak / unduh rapot"
-              }
-            }
-          }
-        }
-        Response: intent = "DIRECT_LINK" (Prob: 1.0)
-
-      • Laya Local MLX (Fallback / Local):
-        POST http://127.0.0.1:4141/embed
-        Payload: { "text": "lihat siswa nunggak kelas 8B" }
-        Response: Dense Vector [768 dimensions]
-        Proses: Menghitung Cosine Similarity vs anchors.json + Softmax (T=0.05)
-
-     │
-     ▼
-[Step 2: Slot / Parameter Extraction]
-  ↳ File: service-search/src/extractor.ts
-  ↳ Parsing regex & semantic dictionary:
-      • Regex `\b([789]|1[0-2])\s*([A-Za-z])\b`  ➔ kelas: "8B"
-      • Keyword Dictionary `nunggak|belum bayar`  ➔ status: "nunggak"
-  ↳ Output: { kelas: "8B", status: "nunggak" }
-
-     │
-     ▼
-[Step 3: Action Dispatching]
-  ↳ File: service-search/src/dispatcher.ts
-  ↳ Memetakan Intent `DIRECT_LINK` + parameter `spp/nunggak`:
-      • target_url = "/spp?status=nunggak&kelas=8B"
-      • title = "Data Tagihan & Pembayaran SPP - Kelas 8B"
-  ↳ Output JSON dikirim kembali ke App Pendidikan Backend
-
-     │
-     ▼
-[Step 4: Query Database SQLite]
-  ↳ File: app-education/src/server.ts (:3000)
-  ↳ Client/Browser membuka target_url: GET /api/spp?status=nunggak&kelas=8B
-  ↳ Server mengeksekusi parameterized query ke SQLite (education.db):
-      ```sql
-      SELECT id, siswa_id, nama_siswa, kelas, bulan, nominal, status, jatuh_tempo 
-      FROM spp 
-      WHERE 1=1 
-        AND LOWER(status) = LOWER('nunggak') 
-        AND LOWER(kelas) = LOWER('8B');
-      ```
-  ↳ Database Return:
-      - Budi Santoso (Rp 500.000, nunggak)
-      - Farhan Nugraha (Rp 500.000, nunggak)
 
 ---
 
@@ -367,20 +342,28 @@ Berikut adalah urutan riil pemanggilan fungsi, HTTP endpoint, dan query database
 
 Untuk mendukung **ribuan pengguna melakukan search secara bersamaan**, sistem dilengkapi dengan arsitektur dua tingkat cache berbasis **Redis (`TTL 1800 detik / 30 Menit`)**:
 
-```
-[Ribuan Search Masuk] ──▶ [ Service Search (:4000) ]
-                                  │
-                                  ▼
-                     ┌───────────────────────────┐
-                     │ Redis Cache (TTL 30 Menit)│
-                     └─────────────┬─────────────┘
-                                   │
-              ┌────────────────────┴────────────────────┐
-              ▼ (Cache Hit ~80%)                        ▼ (Cache Miss ~20%)
-    [ Langsung dari Redis ]                     [ Panggil JEV Cloud ]
-    • Latensi: < 1ms                            • Latensi: ~280ms
-    • CPU Server: 0%                            • JEV Inferences System One
-    • Biaya AI Token: $0                        • Hasil disimpan ke Redis (TTL 30m)
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Users as Ribuan User Bersamaan
+    participant Search as Service Search (:4000)
+    participant Redis as Redis Cache (:6379)<br/>(smartsearch:q:...)
+    participant JEV as TypeSafe JEV Cloud API
+
+    Users->>Search: Search Query
+    Search->>Redis: Cek Cache (GET Key)
+    
+    alt Skenario 1: Cache Hit (~80% Trafik Berulang)
+        Redis-->>Search: Return Data JSON Cache
+        Note over Search,Redis: Latensi < 1ms | Beban CPU 0% | Biaya Token $0
+        Search-->>Users: Respon Instan (< 1ms)
+    else Skenario 2: Cache Miss (~20% Query Baru)
+        Redis-->>Search: Nil (Data Belum Ada)
+        Search->>JEV: Panggil JEV Cloud System One (~280ms)
+        JEV-->>Search: Hasil Klasifikasi Intent
+        Search->>Redis: Simpan ke Redis (SETEX TTL 1800s)
+        Search-->>Users: Respon Hasil Klasifikasi
+    end
 ```
 
 ### 1. Dynamic Route Manifest Sync (Zero-Hardcoded Routes)
@@ -399,29 +382,61 @@ Untuk mendukung **ribuan pengguna melakukan search secara bersamaan**, sistem di
 
 Sistem mengadopsi skema database nyata Pintro untuk otorisasi menu dan isolasi tenant:
 
+```mermaid
+classDiagram
+    direction LR
+    class PintroJob {
+        +TEXT id
+        +TEXT code
+        +TEXT name
+        +TEXT parent
+        +INTEGER ordering
+        +INTEGER display
+        +TEXT icon
+        +TEXT client_id
+    }
+    class PintroGroups {
+        +TEXT id
+        +TEXT code
+        +TEXT name
+        +TEXT client_id
+    }
+    class PintroACL {
+        +TEXT id
+        +TEXT groups_id
+        +TEXT job_id
+        +INTEGER add_priv
+        +INTEGER edit_priv
+        +INTEGER remove_priv
+        +INTEGER delete_priv
+        +TEXT client_id
+    }
+    class ServiceSearch {
+        +smartsearch:routes:client:role
+        +smartsearch:q:client:role:engine:q
+        +validateDestinationACL()
+    }
+
+    PintroGroups "1" --> "*" PintroACL : has role
+    PintroJob "1" --> "*" PintroACL : permits menu
+    PintroACL ..> ServiceSearch : Dynamic Routes Sync
 ```
-[ HTTP Headers ]
-X-Client-Id: 1
-X-User-Role: GURU
-       │
-       ▼
-┌────────────────────────────────────────────────────────┐
-│ App Pendidikan (:3000) - Pintro Dynamic Route Sync     │
-│ Query ACL:                                             │
-│   SELECT j.id, j.code, j.name, j.path                  │
-│   FROM pintro.job j                                    │
-│   JOIN pintro.acl a ON a.job_id = j.id                 │
-│   JOIN pintro.groups g ON g.id = a.groups_id           │
-│   WHERE j.client_id = ? AND UPPER(g.code) = ?          │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-                           ▼ (Hanya route yang diizinkan)
-┌────────────────────────────────────────────────────────┐
-│ Service Search (:4000)                                 │
-│ Redis Cache Key:                                       │
-│   smartsearch:routes:<client_id>:<role>                │
-│   smartsearch:q:<client_id>:<role>:<engine>:<query>    │
-└────────────────────────────────────────────────────────┘
+
+### Flowchart Evaluasi Hak Akses ACL Menu:
+
+```mermaid
+flowchart TD
+    A[User Search Query] --> B[Header: X-Client-Id & X-User-Role]
+    B --> C{Cek Cache Redis Routes}
+    C -- Cache Hit --> D[Daftar Permitted Routes]
+    C -- Cache Miss --> E[SQL Join: job + acl + groups]
+    E --> F[Simpan ke Redis TTL 30m]
+    F --> D
+
+    D --> G[Dispatcher Filter Opsi]
+    G --> H{Apakah Opsi Diizinkan ACL?}
+    H -- Ya misal Guru ke /kelas --> I[Tampilkan di Response Options]
+    H -- Tidak misal Guru ke /spp --> J[BLOKIR / Hapus dari Response]
 ```
 
 ### Tabel Relasi Pintro yang Digunakan:
@@ -439,6 +454,31 @@ X-User-Role: GURU
 ## 11. Entity Master Resolver, Multi-Option Array & Threshold Matching
 
 Sistem mengadopsi format standardized response berbentuk array `options[]` dengan pembeda target `DETAIL` vs `LIST`:
+
+```mermaid
+flowchart TD
+    Q[User Input Query] --> E{Apakah Mengandung Entitas?}
+    
+    E -- Siswa 'Siti' --> S[Lookup Profil Siswa S002]
+    S --> R{Pertanyaan Tentang Kelas?}
+    R -- Ya misal 'kelas mana' --> S1[Rank 1: Ruang Kelas 8B /kelas/K-08B]
+    R -- Tidak --> S2[Rank 1: Profil Siswa /siswa/S002]
+    S1 --> S3[Rank 2: Profil Siswa /siswa/S002]
+    S3 --> S4[Rank 3: Invoice SPP jika Role Keuangan]
+
+    E -- Pertanyaan Agregasi --> A[Query Tunggakan per Kelas]
+    A --> A1[Rank 1: Rekap Semua Nunggak /spp?status=nunggak]
+    A1 --> A2[Rank 2: Tunggakan Kelas 8B /spp?kelas_id=K-08B]
+    A2 --> A3[Rank 3: Tunggakan Kelas 9A /spp?kelas_id=K-09A]
+
+    E -- Identifier Murni misal 'INV-001' --> D[Target: DETAIL Halaman Invoice]
+    D --> D1[Rank 1: /spp/invoice/INV-2024-10-001]
+
+    E -- Kata Filter List misal 'siswa nunggak 8B' --> L[Target: LIST Halaman Tabel Modul]
+    L --> L1[Rank 1: /spp?status=nunggak&kelas=8B]
+```
+
+### Contoh Kontrak Standardized JSON Array Output:
 
 ```json
 {
