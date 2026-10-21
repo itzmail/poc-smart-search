@@ -59,6 +59,66 @@ Sistem ini mendukung arsitektur **Dual-Engine**:
                    └─────────────────────────────────────────┘
 ```
 
+### Sequence Diagram Alur End-to-End (Mermaid)
+
+Diagram di bawah ini menggunakan standar **Mermaid JS** (otomatis dirender sebagai diagram grafis interaktif di GitHub, GitLab, VS Code, maupun Notion):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Pengguna / ng-app
+    participant App as App Pendidikan (:3000)<br/>(Gateway & ACL)
+    participant Search as Search Engine (:4000)<br/>(Dispatcher)
+    participant Redis as Redis Cache (:6379)<br/>(TTL 30m)
+    participant AI as AI Engine<br/>(JEV Cloud / Laya MLX)
+    participant DB as SQLite DB<br/>(Pintro Schema)
+
+    User->>App: GET /api/search?q="anak siti kelas mana"<br/>[Header: X-Client-Id: 1, X-User-Role: GURU]
+    App->>Search: GET /resolve?q=...<br/>[Forward Header Client & Role]
+    
+    rect rgb(240, 248, 255)
+        note over Search,Redis: Tahap 1: Cek Query Cache
+        Search->>Redis: GET smartsearch:q:1:GURU:jev:...
+        alt Cache Hit
+            Redis-->>Search: Return Cached Standardized JSON (< 1ms)
+            Search-->>App: Return Cached JSON
+            App-->>User: 200 OK (Render Options)
+        end
+    end
+
+    rect rgb(255, 250, 240)
+        note over Search,AI: Tahap 2: AI Semantic Intent Classification
+        Search->>AI: POST /systemone (JEV) / /embed (Laya)<br/>Payload: { state: query, criteria }
+        AI-->>Search: Intent: "DIRECT_LINK" (Conf: 100%, Probs)
+    end
+
+    rect rgb(245, 255, 245)
+        note over Search,DB: Tahap 3: Dynamic Routes & Entity Resolution
+        Search->>Redis: GET smartsearch:routes:1:GURU
+        opt Cache Miss Routes
+            Search->>App: GET /api/routes [Headers: Client-1, Role-GURU]
+            App->>DB: SELECT j.* FROM job j JOIN acl a JOIN groups g...
+            DB-->>App: 5 Permitted Jobs (dashboard, siswa, nilai, rapot, kelas)
+            App-->>Search: Permitted Routes JSON
+            Search->>Redis: SET smartsearch:routes:1:GURU (TTL 30m)
+        end
+
+        Search->>App: GET /api/master/resolve?q="siti"
+        App->>DB: SELECT id, nama, kelas_id FROM siswa WHERE nama LIKE '%siti%'
+        DB-->>App: Siswa S002: Siti Rahma (Kelas: 8B, ID: K-08B)
+        App-->>Search: Entity: { type: "siswa", id: "S002", meta: { kelas_id: "K-08B" } }
+    end
+
+    rect rgb(255, 240, 245)
+        note over Search,Search: Tahap 4: Dispatcher & Role ACL Gatekeeper
+        Search->>Search: Ranking Opsi:<br/>#1 Ruang Kelas 8B (/kelas/K-08B)<br/>#2 Profil Siti (/siswa/S002)<br/>*Tagihan SPP DIBLOKIR karena Role = GURU*
+        Search->>Redis: SET smartsearch:q:1:GURU:jev:... (TTL 30m)
+    end
+
+    Search-->>App: Standardized JSON (Array 2 Options)
+    App-->>User: 200 OK Response Standardized Options
+```
+
 ---
 
 ## 3. Komparasi: TypeSafe JEV vs Laya MLX
@@ -436,6 +496,37 @@ Sistem mengadopsi format standardized response berbentuk array `options[]` denga
 4. **Dynamic Threshold**:
    - Query param `threshold` (default `0.20` atau 20%).
    - Hanya opsi dengan probabilitas/skor di atas threshold yang masuk ke array `options[]` terurut menurut rank.
+
+### 5. Penanganan Pertanyaan Alami Manusia & Relasi Entitas Otomatis:
+
+Sistem telah diuji dan dilengkapi pemahaman pertanyaan bisnis bahasa manusia:
+
+#### A. Pertanyaan Relasi: *"Aku ingin tahu nama anak siti ada di kelas mana"*
+* **Pemecahan Masalah**:
+  1. JEV/Laya mengenali intent `DIRECT_LINK`.
+  2. Smart Resolver mengekstrak nama **"Siti"** ➔ menemukan siswi **Siti Rahma** (NISN `0081234562`, Kelas `8B`, Kelas ID `K-08B`).
+  3. Sistem mendeteksi kata tanya **"di kelas mana"** ➔ **Ruang Kelas 8B dinaikkan ke Rank #1**.
+* **Proteksi ACL Berdasarkan Role**:
+  - Jika yang mencari adalah **Role `GURU`**:
+    - Hanya menghasilkan 2 opsi legal: Ruang Kelas 8B (`/kelas/K-08B`) & Profil Siswa (`/siswa/S002`). Opsi SPP/Tagihan **otomatis diblokir** karena Guru tidak memiliki izin modul keuangan.
+  - Jika yang mencari adalah **Role `KEUANGAN`**:
+    - Menghasilkan 3 opsi lengkap termasuk tagihan SPP (`/spp/invoice/INV-2024-10-002`).
+
+#### B. Pertanyaan Agregasi: *"Kelas mana saja yang telat bayar?"*
+* **Pemecahan Masalah**:
+  1. JEV/Laya mengenali domain keuangan SPP.
+  2. Resolver mendeteksi kata tanya agregasi (*"kelas mana saja yang telat/nunggak"*).
+  3. Database mengeksekusi kalkulasi tunggakan nyata per kelas:
+     ```sql
+     SELECT k.id, k.name, COUNT(s.id) as total_nunggak, SUM(s.nominal) as total_nominal
+     FROM spp s JOIN master_kelas k ON LOWER(k.code) = LOWER(s.kelas)
+     WHERE s.client_id = ? AND s.status = 'nunggak'
+     GROUP BY k.id, k.name;
+     ```
+  4. Dispatcher mengembalikan multi-opsi:
+     - **Rank #1**: `Rekap Tunggakan SPP per Kelas` ➔ `/spp?status=nunggak`
+     - **Rank #2**: `Daftar Tunggakan Kelas 8B (2 Siswa - Total Rp 1.000.000)` ➔ `/spp?status=nunggak&kelas_id=K-08B`
+     - **Rank #3**: `Daftar Tunggakan Kelas 9A (1 Siswa - Total Rp 550.000)` ➔ `/spp?status=nunggak&kelas_id=K-09A`
 
 ---
 
