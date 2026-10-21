@@ -59,64 +59,39 @@ Sistem ini mendukung arsitektur **Dual-Engine**:
                    └─────────────────────────────────────────┘
 ```
 
-### Sequence Diagram Alur End-to-End (Mermaid)
+### Sequence Diagram Alur Kerja Smart Search (Sederhana & Mudah Dipahami)
 
-Diagram di bawah ini menggunakan standar **Mermaid JS** (otomatis dirender sebagai diagram grafis interaktif di GitHub, GitLab, VS Code, maupun Notion):
+Diagram ini menjelaskan alur kerja dari sudut pandang interaksi nyata: **Pengguna mengetik ➔ Sistem memahami maksud ➔ Cek hak akses ➔ Ambil data ➔ Tampilkan opsi tindakan**.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as Pengguna / ng-app
-    participant App as App Pendidikan (:3000)<br/>(Gateway & ACL)
-    participant Search as Search Engine (:4000)<br/>(Dispatcher)
-    participant Redis as Redis Cache (:6379)<br/>(TTL 30m)
-    participant AI as AI Engine<br/>(JEV Cloud / Laya MLX)
-    participant DB as SQLite DB<br/>(Pintro Schema)
+    actor User as 👤 Pengguna (Guru / Staf)
+    participant SearchBar as 🔍 Search Bar Aplikasi
+    participant Memori as ⚡ Memori Cepat (Cache)
+    participant OtakAI as 🧠 Otak AI (Paham Bahasa)
+    participant IzinAkses as 🛡️ Hak Akses (Role Guru)
+    participant Database as 🗄️ Database Sekolah
 
-    User->>App: GET /api/search?q="anak siti kelas mana"<br/>[Header: X-Client-Id: 1, X-User-Role: GURU]
-    App->>Search: GET /resolve?q=...<br/>[Forward Header Client & Role]
+    User->>SearchBar: Ketik: "Anak Siti ada di kelas mana?"
     
-    rect rgb(240, 248, 255)
-        note over Search,Redis: Tahap 1: Cek Query Cache
-        Search->>Redis: GET smartsearch:q:1:GURU:jev:...
-        alt Cache Hit
-            Redis-->>Search: Return Cached Standardized JSON (< 1ms)
-            Search-->>App: Return Cached JSON
-            App-->>User: 200 OK (Render Options)
-        end
+    SearchBar->>Memori: Cek: "Pernah ada yang cari ini sebelumnya?"
+    alt Sudah Pernah Dicari (Langsung Cepat)
+        Memori-->>SearchBar: Ambil jawaban dari memori (< 1 milidetik)
+        SearchBar-->>User: Tampilkan Opsi: Buka Ruang Kelas Siti (Kelas 8B)
+    else Belum Pernah (Proses Baru)
+        SearchBar->>OtakAI: Tanya AI: "Apa maksud pertanyaan user ini?"
+        OtakAI-->>SearchBar: Maksud User: "Ingin buka halaman detail ruang kelas"
+        
+        SearchBar->>Database: Cari: "Siapa siswa bernama Siti & di mana kelasnya?"
+        Database-->>SearchBar: Ditemukan: Siti Rahma (Kelas 8B / ID: K-08B)
+        
+        SearchBar->>IzinAkses: Cek: "Apakah Guru boleh lihat kelas & keuangan Siti?"
+        IzinAkses-->>SearchBar: Boleh lihat Kelas & Siswa (Modul Tagihan Uang DIBLOKIR)
+        
+        SearchBar->>Memori: Simpan hasil ini di memori (agar pencarian berikutnya instan)
+        SearchBar-->>User: Tampilkan Pilihan:<br/>1. Buka Ruang Kelas 8B (Kelas Siti)<br/>2. Buka Profil Biodata Siti Rahma
     end
-
-    rect rgb(255, 250, 240)
-        note over Search,AI: Tahap 2: AI Semantic Intent Classification
-        Search->>AI: POST /systemone (JEV) / /embed (Laya)<br/>Payload: { state: query, criteria }
-        AI-->>Search: Intent: "DIRECT_LINK" (Conf: 100%, Probs)
-    end
-
-    rect rgb(245, 255, 245)
-        note over Search,DB: Tahap 3: Dynamic Routes & Entity Resolution
-        Search->>Redis: GET smartsearch:routes:1:GURU
-        opt Cache Miss Routes
-            Search->>App: GET /api/routes [Headers: Client-1, Role-GURU]
-            App->>DB: SELECT j.* FROM job j JOIN acl a JOIN groups g...
-            DB-->>App: 5 Permitted Jobs (dashboard, siswa, nilai, rapot, kelas)
-            App-->>Search: Permitted Routes JSON
-            Search->>Redis: SET smartsearch:routes:1:GURU (TTL 30m)
-        end
-
-        Search->>App: GET /api/master/resolve?q="siti"
-        App->>DB: SELECT id, nama, kelas_id FROM siswa WHERE nama LIKE '%siti%'
-        DB-->>App: Siswa S002: Siti Rahma (Kelas: 8B, ID: K-08B)
-        App-->>Search: Entity: { type: "siswa", id: "S002", meta: { kelas_id: "K-08B" } }
-    end
-
-    rect rgb(255, 240, 245)
-        note over Search,Search: Tahap 4: Dispatcher & Role ACL Gatekeeper
-        Search->>Search: Ranking Opsi:<br/>#1 Ruang Kelas 8B (/kelas/K-08B)<br/>#2 Profil Siti (/siswa/S002)<br/>*Tagihan SPP DIBLOKIR karena Role = GURU*
-        Search->>Redis: SET smartsearch:q:1:GURU:jev:... (TTL 30m)
-    end
-
-    Search-->>App: Standardized JSON (Array 2 Options)
-    App-->>User: 200 OK Response Standardized Options
 ```
 
 ---
@@ -290,79 +265,60 @@ curl "http://127.0.0.1:3000/api/search?q=lihat%20siswa%20nunggak%20kelas%208B&en
 
 ---
 
-## 8. Tracing Alur Eksekusi Kode: Dari Search ke Database
+## 8. Tracing Alur Eksekusi Kode: Dari Input ke Tindakan
 
-Berikut adalah urutan riil pemanggilan fungsi, HTTP endpoint, dan query database ketika pengguna mengetik search query:
+Diagram alur berikut menjelaskan bagaimana sistem memproses pencarian terfilter seperti *"lihat siswa nunggak kelas 8B"*:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as Pengguna / Browser
-    participant Gateway as App Gateway (:3000)<br/>(app-education/server.ts)
-    participant Classifier as Classifier (:4000)<br/>(classifier.ts)
-    participant JEV as TypeSafe JEV Cloud<br/>(api.typesafe.ai)
-    participant Extractor as Slot Extractor<br/>(extractor.ts)
-    participant Dispatcher as Dispatcher Engine<br/>(dispatcher.ts)
-    participant SQLite as SQLite DB<br/>(education.db)
+    actor User as 👤 Pengguna
+    participant App as 📱 Aplikasi Sekolah
+    participant AI as 🧠 AI Paham Bahasa
+    participant Filter as 🏷️ Penarik Kata Kunci
+    participant DB as 🗄️ Database Sekolah
 
-    User->>Gateway: GET /api/search?q="lihat siswa nunggak kelas 8B"
-    Gateway->>Classifier: Forward Query ke /resolve (:4000)
+    User->>App: Ketik: "Lihat siswa nunggak kelas 8B"
     
-    rect rgb(240, 248, 255)
-        note over Classifier,JEV: Step 1: Classification Engine
-        Classifier->>JEV: POST /v1/systemone<br/>Payload: { state: query, criteria: { LIST_MENU, DIRECT_LINK, REPORT_ACTION } }
-        JEV-->>Classifier: Response: { intent: "DIRECT_LINK", confidence: 1.0 }
-    end
-
-    rect rgb(255, 250, 240)
-        note over Classifier,Extractor: Step 2: Slot / Parameter Extraction
-        Classifier->>Extractor: extractParams("lihat siswa nunggak kelas 8B")
-        Extractor-->>Classifier: Slots: { kelas: "8B", status: "nunggak" }
-    end
-
-    rect rgb(245, 255, 245)
-        note over Classifier,Dispatcher: Step 3: Action Dispatching
-        Classifier->>Dispatcher: dispatchAction(intent, slots, routes)
-        Dispatcher-->>Classifier: Action: DIRECT_LINK ➔ "/spp?status=nunggak&kelas=8B"
-        Classifier-->>Gateway: Return Search Response JSON
-    end
-
-    rect rgb(255, 240, 245)
-        note over Gateway,SQLite: Step 4: Query Database SQLite
-        User->>Gateway: GET /api/spp?status=nunggak&kelas=8B
-        Gateway->>SQLite: SELECT * FROM spp WHERE status='nunggak' AND kelas='8B'
-        SQLite-->>Gateway: 2 Record (Budi Santoso & Farhan Nugraha)
-        Gateway-->>User: 200 OK Response Data
-    end
+    App->>AI: Tanya: "Pengguna mau buka menu atau filter data?"
+    AI-->>App: "Pengguna mau lihat tabel data terfilter (DIRECT_LINK)"
+    
+    App->>Filter: Ambil kata kunci filter dari kalimat
+    Filter-->>App: Didapat: Kelas = "8B" & Status = "Nunggak"
+    
+    App->>DB: Ambil data siswa nunggak di kelas 8B
+    DB-->>App: Ditemukan 2 siswa (Budi & Farhan)
+    
+    App-->>User: Buka Halaman Tagihan SPP Kelas 8B (Filter Nunggak Aktif)
 ```
 
 ---
 
-## 9. Skalabilitas Tinggi: Redis Cache (TTL 30 Menit) & Proteksi CPU/RAM
+## 9. Skalabilitas Tinggi: Memori Cepat (Cache) Menahan Ribuan User
 
-Untuk mendukung **ribuan pengguna melakukan search secara bersamaan**, sistem dilengkapi dengan arsitektur dua tingkat cache berbasis **Redis (`TTL 1800 detik / 30 Menit`)**:
+Untuk mendukung **ribuan pengguna mencari secara bersamaan**, sistem memakai memori cepat (Cache) agar server tidak berat dan tidak bolak-balik memanggil AI:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Users as Ribuan User Bersamaan
-    participant Search as Service Search (:4000)
-    participant Redis as Redis Cache (:6379)<br/>(smartsearch:q:...)
-    participant JEV as TypeSafe JEV Cloud API
+    actor Users as 👥 Ribuan Pengguna Bersamaan
+    participant Sistem as ⚡ Sistem Search
+    participant Memori as 💾 Memori Cepat (Cache)
+    participant AI as 🧠 Otak AI
 
-    Users->>Search: Search Query
-    Search->>Redis: Cek Cache (GET Key)
+    Users->>Sistem: Kirim Pencarian
+    Sistem->>Memori: Cek: "Apakah kata kunci ini sudah ada di memori?"
     
-    alt Skenario 1: Cache Hit (~80% Trafik Berulang)
-        Redis-->>Search: Return Data JSON Cache
-        Note over Search,Redis: Latensi < 1ms | Beban CPU 0% | Biaya Token $0
-        Search-->>Users: Respon Instan (< 1ms)
-    else Skenario 2: Cache Miss (~20% Query Baru)
-        Redis-->>Search: Nil (Data Belum Ada)
-        Search->>JEV: Panggil JEV Cloud System One (~280ms)
-        JEV-->>Search: Hasil Klasifikasi Intent
-        Search->>Redis: Simpan ke Redis (SETEX TTL 1800s)
-        Search-->>Users: Respon Hasil Klasifikasi
+    alt Skenario 1: Sudah Ada (~80% Pencarian Umum)
+        Memori-->>Sistem: Ambil jawaban langsung dari memori
+        Note over Sistem,Memori: Kecepatan Kilat (< 1 milidetik) | Beban Server 0%
+        Sistem-->>Users: Tampilkan Jawaban Seketika
+    else Skenario 2: Belum Ada (Pertanyaan Baru)
+        Memori-->>Sistem: Belum ada
+        Sistem->>AI: Panggil AI untuk memahami maksud kalimat
+        AI-->>Sistem: AI memberikan arti kalimat
+        Sistem->>Memori: Simpan jawaban di memori selama 30 menit
+        Sistem-->>Users: Tampilkan Jawaban
     end
 ```
 
