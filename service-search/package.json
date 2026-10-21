@@ -1,0 +1,22 @@
+{
+  "name": "service-search",
+  "version": "1.0.0",
+  "description": "Smart Search Engine Service powered by TypeSafe JEV & Local Laya",
+  "main": "src/server.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "cli": "bun run src/cli.ts",
+    "benchmark": "bun run src/benchmark.ts",
+    "node:start": "node --loader ts-node/esm src/server.ts",
+    "node:cli": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

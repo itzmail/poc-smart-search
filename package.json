@@ -1,0 +1,16 @@
+{
+  "name": "poc-smart-search",
+  "version": "1.0.0",
+  "description": "POC Smart Search using TypeSafe JEV & Local Laya",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "bun run run-test.ts",
+    "test:benchmark": "cd service-search && bun run benchmark",
+    "cli": "cd service-search && bun run cli",
+    "start:search": "cd service-search && bun run start",
+    "start:app": "cd app-education && bun run start"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  }
+}

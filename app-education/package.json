@@ -1,0 +1,19 @@
+{
+  "name": "app-education",
+  "version": "1.0.0",
+  "description": "Mock Backend Pendidikan with Smart Search Integration",
+  "main": "src/server.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "node:start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

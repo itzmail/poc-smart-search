@@ -1,0 +1,46 @@
+{
+  "LIST_MENU": [
+    "buka menu pembayaran spp",
+    "ke menu siswa",
+    "halaman nilai akademik",
+    "menu cetak rapot",
+    "pengaturan profil sekolah",
+    "navigasi dashboard",
+    "daftar menu keuangan",
+    "lihat menu tagihan",
+    "halaman data guru",
+    "buka modul akademik",
+    "menu absensi kelas",
+    "navigasi ke master data",
+    "link menu perpustakaan",
+    "tampilkan list menu rapor"
+  ],
+  "DIRECT_LINK": [
+    "lihat siswa nunggak kelas 8B",
+    "data nilai matematika kelas 9A semester ganjil",
+    "filter siswa aktif kelas 7C",
+    "tampilkan tagihan spp yang belum lunas kelas 8",
+    "buka nilai ipa semester genap",
+    "cari siswa bernama budi santoso kelas 8B",
+    "list siswa belum bayar uang sekolah",
+    "filter tabel nilai ujian kelas 9",
+    "buka rekapan absensi kelas 7A",
+    "data tunggakan spp tahun 2024",
+    "daftar murid kelas 8A yang aktif",
+    "lihat rincian nilai siswa ani"
+  ],
+  "REPORT_ACTION": [
+    "cetak rapot kelas 8B semester ganjil",
+    "unduh rapot siswa budi santoso",
+    "print raport semester 1 format pdf",
+    "download file rapot kelas 9A",
+    "cetak lembar rapor semester genap",
+    "ekspor laporan rapot kelas 7",
+    "download e-rapor kelas 8B lengkap",
+    "cetak rekap rapot siswa",
+    "print out rapot semester ganjil",
+    "unduh dokumen rapor pdf kelas 9",
+    "cetak buku rapor kurikulum merdeka",
+    "download raport penilaian akhir semester"
+  ]
+}
