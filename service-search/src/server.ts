@@ -5,18 +5,15 @@ import { extractParams } from "./extractor.js";
 import { dispatchAction, type SmartSearchResponse } from "./dispatcher.js";
 import { printSearchProcess } from "./visualizer.js";
 import { cacheGet, cacheSet, DEFAULT_TTL_SECONDS, getCacheStatus } from "./cache/redis.js";
-import { getActiveRoutes } from "./routes-sync.js";
+import { getActiveRoutes, resolveEntities } from "./routes-sync.js";
 
 const PORT = parseInt(process.env.SEARCH_PORT || "4000", 10);
-
-// Inisialisasi awal cache routes dari App Pendidikan
-getActiveRoutes().catch(() => {});
 
 const server = http.createServer(async (req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, X-User-Role");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -39,14 +36,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Refresh dynamic route manifest on demand (Webhook / Manual trigger)
+  // Refresh dynamic route manifest on demand
   if (parsedUrl.pathname === "/routes/refresh" && req.method === "POST") {
-    const refreshed = await getActiveRoutes(true);
+    const clientId = (req.headers["x-client-id"] || "1").toString();
+    const role = (req.headers["x-user-role"] || "SUPERADMIN").toString();
+    const refreshed = await getActiveRoutes(clientId, role, true);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
         status: "success",
         message: "Dynamic routes refreshed into Redis cache",
+        client_id: clientId,
+        role,
         total_routes: refreshed.length,
         routes: refreshed.map((r) => r.path),
       })
@@ -57,10 +58,23 @@ const server = http.createServer(async (req, res) => {
   if (parsedUrl.pathname === "/resolve") {
     let query = "";
     let engine: "auto" | "jev" | "laya" = "auto";
+    let clientId = (req.headers["x-client-id"] || "1").toString();
+    let userRole = (req.headers["x-user-role"] || "SUPERADMIN").toString().toUpperCase();
+    let threshold = 0.2;
 
     if (req.method === "GET") {
-      query = parsedUrl.searchParams.get("q") || "";
+      const rawQ = parsedUrl.searchParams.get("q") || "";
+      query = rawQ.replace(/\+/g, " ");
       engine = (parsedUrl.searchParams.get("engine") as any) || "auto";
+      if (parsedUrl.searchParams.has("client_id")) {
+        clientId = parsedUrl.searchParams.get("client_id")!;
+      }
+      if (parsedUrl.searchParams.has("role")) {
+        userRole = parsedUrl.searchParams.get("role")!.toUpperCase();
+      }
+      if (parsedUrl.searchParams.has("threshold")) {
+        threshold = parseFloat(parsedUrl.searchParams.get("threshold")!) || 0.2;
+      }
     } else if (req.method === "POST") {
       const buffers: Buffer[] = [];
       for await (const chunk of req) {
@@ -70,6 +84,9 @@ const server = http.createServer(async (req, res) => {
         const body = JSON.parse(Buffer.concat(buffers).toString("utf-8"));
         query = body.q || body.query || "";
         engine = body.engine || "auto";
+        if (body.client_id) clientId = body.client_id;
+        if (body.role) userRole = body.role.toUpperCase();
+        if (body.threshold != null) threshold = parseFloat(body.threshold);
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Invalid JSON body" }));
@@ -84,9 +101,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const normalizedKey = `smartsearch:q:${engine}:${trimmedQuery.toLowerCase()}`;
+    // MULTI-TENANT & ROLE-ISOLATED CACHE KEY DI REDIS
+    const normalizedKey = `smartsearch:q:${clientId}:${userRole}:${engine}:${threshold}:${trimmedQuery.toLowerCase()}`;
 
-    // 1. CEK QUERY RESULT CACHE DI REDIS (TTL 30 Menit)
+    // 1. CEK QUERY RESULT CACHE DI REDIS
     const cachedResultStr = await cacheGet(normalizedKey);
     if (cachedResultStr) {
       try {
@@ -94,7 +112,11 @@ const server = http.createServer(async (req, res) => {
         cachedResponse.cached = true;
         cachedResponse.latency_ms = 0.8; // Instant hit from cache
 
-        console.log(pc.green(`⚡ [REDIS CACHE HIT (TTL 30m)] Query: "${trimmedQuery}" -> Latency < 1ms`));
+        console.log(
+          pc.green(
+            `⚡ [REDIS CACHE HIT (TTL 30m)] [Tenant: ${clientId} | Role: ${userRole}] "${trimmedQuery}" -> Latency < 1ms`
+          )
+        );
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(cachedResponse, null, 2));
@@ -102,20 +124,30 @@ const server = http.createServer(async (req, res) => {
       } catch {}
     }
 
-    // 2. QUERY BELUM DI CACHE: Jalankan Klasifikasi AI + Parameter Extraction
+    // 2. QUERY BELUM DI CACHE: Klasifikasi AI + Entity Lookup + ACL Routes
     try {
       const startTime = performance.now();
-      const [classification, dynamicRoutes] = await Promise.all([
+      const [classification, dynamicRoutes, resolvedEntities] = await Promise.all([
         classifyIntent(trimmedQuery, engine),
-        getActiveRoutes(),
+        getActiveRoutes(clientId, userRole),
+        resolveEntities(trimmedQuery, clientId),
       ]);
 
       const params = extractParams(trimmedQuery);
-      const response = dispatchAction(trimmedQuery, classification, params, dynamicRoutes);
+      const response = dispatchAction(
+        trimmedQuery,
+        classification,
+        params,
+        dynamicRoutes,
+        resolvedEntities,
+        threshold
+      );
       response.latency_ms = Math.round((performance.now() - startTime) * 100) / 100;
       response.cached = false;
+      response.client_id = clientId;
+      response.user_role = userRole;
 
-      // Simpan hasil ke Redis dengan TTL 30 Menit (1800 detik)
+      // Simpan hasil ke Redis (TTL 30 Menit)
       await cacheSet(normalizedKey, JSON.stringify(response), DEFAULT_TTL_SECONDS);
 
       // Print visualizer log in terminal
@@ -136,11 +168,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🚀 [Smart Search Engine + Redis Cache] running on http://127.0.0.1:${PORT}`);
-  console.log(`⚡ Query Cache: TTL 30 Menit (${DEFAULT_TTL_SECONDS}s) via Redis`);
+  console.log(`\n🚀 [Smart Search Engine (Entity Resolver & Multi-Options)] running on http://127.0.0.1:${PORT}`);
+  console.log(`⚡ Query Cache: Isolated by X-Client-Id & X-User-Role in Redis (TTL 30m)`);
   console.log(`📡 Endpoints:`);
-  console.log(`   • GET /resolve?q=query&engine=auto|jev|laya`);
-  console.log(`   • POST /resolve (body: { q: string, engine?: string })`);
-  console.log(`   • POST /routes/refresh (Bust & re-fetch dynamic routes)`);
+  console.log(`   • GET /resolve?q=query&threshold=0.2 (Multi-Option Response Array)`);
+  console.log(`   • POST /resolve (body: { q, engine, client_id, role, threshold })`);
   console.log(`   • GET /health\n`);
 });

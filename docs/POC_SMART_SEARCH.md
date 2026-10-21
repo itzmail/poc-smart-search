@@ -335,7 +335,111 @@ Untuk mendukung **ribuan pengguna melakukan search secara bersamaan**, sistem di
 
 ---
 
-## 10. Kesimpulan & Rekomendasi Produksi
+## 10. Integrasi Skema Nyata Pintro: Multi-Tenant (`client_id`) & Role ACL (`job`, `groups`, `acl`)
+
+Sistem mengadopsi skema database nyata Pintro untuk otorisasi menu dan isolasi tenant:
+
+```
+[ HTTP Headers ]
+X-Client-Id: 1
+X-User-Role: GURU
+       │
+       ▼
+┌────────────────────────────────────────────────────────┐
+│ App Pendidikan (:3000) - Pintro Dynamic Route Sync     │
+│ Query ACL:                                             │
+│   SELECT j.id, j.code, j.name, j.path                  │
+│   FROM pintro.job j                                    │
+│   JOIN pintro.acl a ON a.job_id = j.id                 │
+│   JOIN pintro.groups g ON g.id = a.groups_id           │
+│   WHERE j.client_id = ? AND UPPER(g.code) = ?          │
+└──────────────────────────┬─────────────────────────────┘
+                           │
+                           ▼ (Hanya route yang diizinkan)
+┌────────────────────────────────────────────────────────┐
+│ Service Search (:4000)                                 │
+│ Redis Cache Key:                                       │
+│   smartsearch:routes:<client_id>:<role>                │
+│   smartsearch:q:<client_id>:<role>:<engine>:<query>    │
+└────────────────────────────────────────────────────────┘
+```
+
+### Tabel Relasi Pintro yang Digunakan:
+1. **`pintro.job`**: Menyimpan daftar modul/menu (`id`, `code`, `name`, `parent`, `ordering`, `display`, `icon`, `client_id`).
+2. **`pintro.groups`**: Menyimpan master role (`id`, `code`, `name`, `client_id`) seperti `SUPERADMIN`, `GURU`, `KEUANGAN`, `SISWA`.
+3. **`pintro.acl`**: Hak akses relasi group ke job (`groups_id`, `job_id`, `add_priv`, `edit_priv`, `delete_priv`, `client_id`).
+
+### Proteksi Keamanan Hasil Pencarian:
+* **Role GURU**: Memiliki akses ke `DASHBOARD`, `SISWA`, `NILAI`, `RAPOT`. Ketika mencari `"lihat siswa nunggak"`, sistem **menolak memberikan link ke `/spp`** (karena tidak ada di ACL) dan secara cerdas mengalihkannya aman ke `/siswa`.
+* **Role KEUANGAN**: Memiliki akses ke `DASHBOARD`, `SISWA`, `SPP`. Ketika mencari `"cetak rapot"`, sistem **menolak aksi `PRINT_RAPOT`** dan menurunkannya menjadi `LIST_MENU` biasa.
+* **Isolasi Redis**: Cache search query di-tag menggunakan `client_id` dan `role` (`smartsearch:q:1:GURU:jev:...`), menjamin tidak terjadi kebocoran cache antar sekolah maupun antar peran pengguna.
+
+---
+
+## 11. Entity Master Resolver, Multi-Option Array & Threshold Matching
+
+Sistem mengadopsi format standardized response berbentuk array `options[]` dengan pembeda target `DETAIL` vs `LIST`:
+
+```json
+{
+  "status": "success",
+  "query": "kelas 8B",
+  "client_id": "1",
+  "user_role": "KEUANGAN",
+  "engine": "JEV_CLOUD",
+  "threshold": 0.2,
+  "total_options": 2,
+  "options": [
+    {
+      "rank": 1,
+      "score": 0.88,
+      "intent": "DIRECT_LINK",
+      "target_type": "DETAIL",
+      "title": "Detail Kelas 8B",
+      "description": "Buka halaman informasi dan daftar siswa Kelas 8B",
+      "destination": "/kelas/K-08B",
+      "entity": {
+        "type": "kelas",
+        "id": "K-08B",
+        "code": "8b",
+        "name": "Kelas 8B"
+      }
+    },
+    {
+      "rank": 2,
+      "score": 0.79,
+      "intent": "DIRECT_LINK",
+      "target_type": "LIST",
+      "title": "Tagihan SPP - Kelas 8B",
+      "description": "Buka tabel tagihan SPP untuk Kelas 8B",
+      "destination": "/spp?kelas_id=K-08B",
+      "entity": {
+        "type": "kelas",
+        "id": "K-08B",
+        "code": "8b",
+        "name": "Kelas 8B"
+      }
+    }
+  ]
+}
+```
+
+### Komponen Utama:
+1. **Lowercase Job Code & Clean Paths**:
+   - `job.code` di database memakai huruf kecil (`spp`, `siswa`, `nilai`, `rapot`, `dashboard`, `kelas`).
+   - Path tujuan murni diturunkan dari `/${j.code}` tanpa ketergantungan mapping hardcoded.
+2. **Entity Resolver Endpoint (`GET /api/master/resolve?q=...`)**:
+   - Mengekstrak identifier spesifik: Ruang Kelas (`K-08B`), Invoice Tagihan (`INV-2024-10-001`), dan Siswa (`S001`) dengan query parameterized `WHERE client_id = ?`.
+3. **Pembeda `DETAIL` vs `LIST`**:
+   - `DETAIL`: Mengarahkan langsung ke halaman entitas (cth: `/kelas/K-08B` atau `/spp/invoice/INV-...`).
+   - `LIST`: Mengarahkan ke tabel fitur terfilter (cth: `/spp?kelas_id=K-08B&status=nunggak`).
+4. **Dynamic Threshold**:
+   - Query param `threshold` (default `0.20` atau 20%).
+   - Hanya opsi dengan probabilitas/skor di atas threshold yang masuk ke array `options[]` terurut menurut rank.
+
+---
+
+## 12. Kesimpulan & Rekomendasi Produksi
 
 1. **Gunakan TypeSafe JEV untuk Produksi:**
    - Menghilangkan beban pengelolaan dan pelabelan *anchor sentences*.

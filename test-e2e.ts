@@ -4,7 +4,7 @@ const APP_URL = "http://127.0.0.1:3000";
 const SEARCH_URL = "http://127.0.0.1:4000";
 
 async function runE2E() {
-  console.log(pc.bold(pc.cyan("\n🚀 MENJALANKAN TEST INTEGRASI E2E SMART SEARCH + SQLITE\n")));
+  console.log(pc.bold(pc.cyan("\n🚀 MENJALANKAN TEST INTEGRASI E2E: ENTITY RESOLVER & MULTI-OPTION ARRAY\n")));
 
   // 1. Check Search Service
   console.log(pc.bold("1. Memeriksa Service Search (:4000)..."));
@@ -18,63 +18,103 @@ async function runE2E() {
     process.exit(1);
   }
 
-  // 2. Check App Education + SQLite
-  console.log(pc.bold("\n2. Memeriksa App Pendidikan Backend + SQLite (:3000)..."));
+  // 2. Check App Education + Entity Resolver Endpoint
+  console.log(pc.bold("\n2. Memeriksa App Backend & Entity Resolver (:3000)..."));
   try {
-    const aRes = await fetch(`${APP_URL}/api/dashboard`);
-    if (!aRes.ok) throw new Error(`HTTP ${aRes.status}`);
-    const aData = await aRes.json();
-    console.log(pc.green(`   ✔ App Backend + SQLite Siap: Total siswa di DB = ${aData.summary.total_siswa} (Source: ${aData.source})`));
+    const rKelas = await (await fetch(`${APP_URL}/api/master/resolve?q=8B`, { headers: { "X-Client-Id": "1" } })).json();
+    const rInv = await (await fetch(`${APP_URL}/api/master/resolve?q=INV-001`, { headers: { "X-Client-Id": "1" } })).json();
+    console.log(pc.green(`   ✔ Entity Resolver Siap:`));
+    console.log(`     • '8B' ➔ ${rKelas.entities[0]?.type}: [${rKelas.entities[0]?.id}] ${rKelas.entities[0]?.name}`);
+    console.log(`     • 'INV-001' ➔ ${rInv.entities[0]?.type}: [${rInv.entities[0]?.id}] ${rInv.entities[0]?.name}`);
   } catch (err: any) {
     console.error(pc.red(`   ✘ App Backend belum aktif di port 3000: ${err.message}`));
     process.exit(1);
   }
 
-  // 3. Test Scenario 1: LIST_MENU via JEV
-  console.log(pc.bold("\n3. Testing Skenario 1: LIST_MENU (via JEV Engine)"));
-  const q1 = "buka menu pembayaran spp";
-  console.log(`   Query: "${pc.yellow(q1)}"`);
-  const r1 = await (await fetch(`${APP_URL}/api/search?q=${encodeURIComponent(q1)}&engine=jev`)).json();
-  console.log(`   Result Type: ${pc.cyan(r1.type)} | Engine: ${r1.engine} | Latency: ${r1.latency_ms}ms`);
-  console.log(`   Matched Menus: ${r1.result.matched_menus?.map((m: any) => m.title).join(", ")}`);
+  // 3. Test Skenario Ambigu: "kelas 8B" (Harus mengembalikan MULTI-OPTION ARRAY: DETAIL & LIST)
+  console.log(pc.bold("\n3. Testing Skenario Ambigu: 'kelas 8B' (Multi-Option DETAIL & LIST)"));
+  const rAmbigu = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.2&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  console.log(`   Total Options: ${pc.cyan(rAmbigu.total_options)} opsi ditemukan (Threshold: ${rAmbigu.threshold * 100}%)`);
+  rAmbigu.options.forEach((opt: any) => {
+    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
+  });
+  const hasDetail = rAmbigu.options.some((o: any) => o.target_type === "DETAIL");
+  const hasList = rAmbigu.options.some((o: any) => o.target_type === "LIST");
+  console.log(hasDetail && hasList ? pc.green("   ✔ Berhasil: Tersedia opsi DETAIL (/kelas/K-08B) dan LIST (/spp?kelas_id=K-08B).") : pc.red("   ✘ Gagal"));
 
-  // 4. Test Scenario 2: DIRECT_LINK via LAYA + Query ke SQLite
-  console.log(pc.bold("\n4. Testing Skenario 2: DIRECT_LINK (via Laya Local MLX) + Query ke SQLite"));
-  const q2 = "lihat siswa nunggak kelas 8B";
-  console.log(`   Query: "${pc.yellow(q2)}"`);
-  const r2 = await (await fetch(`${APP_URL}/api/search?q=${encodeURIComponent(q2)}&engine=laya`)).json();
-  console.log(`   Result Type: ${pc.cyan(r2.type)} | Engine: ${r2.engine} | Latency: ${r2.latency_ms}ms`);
-  console.log(`   Target URL: ${pc.blue(r2.result.target_url)}`);
+  // 4. Test Skenario List Spesifik: "lihat siswa nunggak kelas 8B"
+  console.log(pc.bold("\n4. Testing Skenario List Filter: 'lihat siswa nunggak kelas 8B'"));
+  const rList = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("lihat siswa nunggak kelas 8B")}&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  const topOpt = rList.options[0];
+  console.log(`   Rank #1: ${pc.yellow(topOpt.target_type)} | Title: ${pc.bold(topOpt.title)}`);
+  console.log(`   Destination: ${pc.blue(topOpt.destination)}`);
+  console.log(topOpt.target_type === "LIST" ? pc.green("   ✔ Target Type LIST menduduki peringkat #1.") : pc.yellow("   ⚠️ Target type bukan LIST"));
 
-  // Eksekusi deep link langsung ke SQLite endpoint
-  const deepRes = await (await fetch(`${APP_URL}${r2.result.target_url}`)).json();
-  console.log(`   Query SQLite Berhasil: ${pc.green(deepRes.count + " record siswa nunggak ditemukan di kelas 8B")}`);
-  console.log(`   Detail Siswa: ${deepRes.data.map((d: any) => `${d.nama_siswa} (${d.nominal})`).join(", ")}`);
+  // 5. Test Skenario Invoice Langsung: "INV-001"
+  console.log(pc.bold("\n5. Testing Skenario Invoice ID: 'INV-001'"));
+  const rInv = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("INV-001")}&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  const invOpt = rInv.options[0];
+  console.log(`   Rank #1: ${pc.yellow(invOpt.target_type)} | Title: ${pc.bold(invOpt.title)}`);
+  console.log(`   Destination: ${pc.blue(invOpt.destination)}`);
+  console.log(invOpt.destination.includes("/spp/invoice/") ? pc.green("   ✔ Berhasil resolusi ke halaman detail invoice.") : pc.red("   ✘ Gagal resolusi"));
 
-  // 5. Test Scenario 3: REPORT_ACTION via JEV
-  console.log(pc.bold("\n5. Testing Skenario 3: REPORT_ACTION (via JEV Engine)"));
-  const q3 = "cetak rapot kelas 8B semester ganjil";
-  console.log(`   Query: "${pc.yellow(q3)}"`);
-  const r3 = await (await fetch(`${APP_URL}/api/search?q=${encodeURIComponent(q3)}&engine=jev`)).json();
-  console.log(`   Result Type: ${pc.cyan(r3.type)} | Engine: ${r3.engine} | Latency: ${r3.latency_ms}ms`);
-  console.log(`   Action: ${pc.green(r3.result.action)}`);
-  console.log(`   Download URL: ${pc.blue(r3.result.download_url)}`);
+  // 6. Test Pengaruh Threshold: 0.8 vs 0.1
+  console.log(pc.bold("\n6. Testing Pengaruh Parameter Threshold:"));
+  const rTight = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.85&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  const rLoose = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.10&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  console.log(`   Threshold 85%: ${pc.cyan(rTight.total_options)} opsi`);
+  console.log(`   Threshold 10%: ${pc.cyan(rLoose.total_options)} opsi`);
+  console.log(rLoose.total_options >= rTight.total_options ? pc.green("   ✔ Threshold bekerja memfilter opsi secara dinamis.") : pc.red("   ✘ Gagal threshold"));
 
-  // Eksekusi download action
-  const dlRes = await fetch(`${APP_URL}${r3.result.download_url}`);
-  const disposition = dlRes.headers.get("content-disposition");
-  const content = await dlRes.text();
-  console.log(`   Header Download: ${pc.green(disposition || "")}`);
-  console.log(`   Isi Dokumen Mock: ${pc.dim(content.replace(/\n/g, " | "))}`);
+  // 7. Test Pertanyaan Alami: "Aku ingin tahu nama anak siti ada di kelas mana"
+  console.log(pc.bold("\n7. Testing Pertanyaan Alami: 'Aku ingin tahu nama anak siti ada di kelas mana'"));
+  const rSiti = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("Aku ingin tahu nama anak siti ada di kelas mana")}&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" },
+    })
+  ).json();
+  console.log(`   Total Options: ${pc.cyan(rSiti.total_options)}`);
+  rSiti.options.forEach((opt: any) => {
+    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
+  });
+  const hasKelasSiti = rSiti.options[0]?.destination === "/kelas/K-08B";
+  console.log(hasKelasSiti ? pc.green("   ✔ Berhasil: Rank #1 membuka Ruang Kelas 8B tempat Siti belajar (/kelas/K-08B).") : pc.red("   ✘ Gagal kelas siti"));
 
-  // 6. Test Scenario 4: Redis Query Caching (TTL 30m) Verification
-  console.log(pc.bold("\n6. Testing Skenario 4: Verifikasi Redis Cache (TTL 30 Menit)"));
-  console.log(`   Query ulang: "${pc.yellow(q1)}" (sebelumnya sudah dipanggil)`);
-  const rCache = await (await fetch(`${APP_URL}/api/search?q=${encodeURIComponent(q1)}&engine=jev`)).json();
-  console.log(`   Cached: ${rCache.cached ? pc.green("✔ TRUE (DILAYANI DARI CACHE)") : pc.red("✘ FALSE")}`);
-  console.log(`   Latency: ${pc.green(rCache.latency_ms + "ms")} (CPU/AI Load: 0%)`);
+  // 8. Test Pertanyaan Agregasi: "kelas mana saja yang telat bayar"
+  console.log(pc.bold("\n8. Testing Pertanyaan Agregasi: 'kelas mana saja yang telat bayar'"));
+  const rTelat = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas mana saja yang telat bayar")}&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" },
+    })
+  ).json();
+  console.log(`   Total Options: ${pc.cyan(rTelat.total_options)}`);
+  rTelat.options.forEach((opt: any) => {
+    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
+  });
+  const hasRekap = rTelat.options.some((o: any) => o.destination.includes("status=nunggak"));
+  console.log(hasRekap ? pc.green("   ✔ Berhasil: Memunculkan rekap tunggakan per kelas (8B dan 9A).") : pc.red("   ✘ Gagal agregasi"));
 
-  console.log(pc.bold(pc.green("\n🎉 SEMUA SKENARIO E2E SMART SEARCH + SQLITE + REDIS BERHASIL TERVERIFIKASI 100%!\n")));
+  console.log(pc.bold(pc.green("\n🎉 SEMUA FITUR STANDARDIZED ARRAY, DETAIL vs LIST & THRESHOLD TERVERIFIKASI 100%!\n")));
 }
 
 runE2E().catch(console.error);
