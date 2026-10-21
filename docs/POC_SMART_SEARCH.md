@@ -230,7 +230,80 @@ curl "http://127.0.0.1:3000/api/search?q=lihat%20siswa%20nunggak%20kelas%208B&en
 
 ---
 
-## 8. Kesimpulan & Rekomendasi Produksi
+## 8. Tracing Alur Eksekusi Kode: Dari Search ke Database
+
+Berikut adalah urutan riil pemanggilan fungsi, HTTP endpoint, dan query database ketika pengguna mengetik search query:
+
+```
+[User Input] "lihat siswa nunggak kelas 8B"
+     │
+     ▼
+[Step 1: Classification Engine]
+  ↳ File: service-search/src/classifier.ts
+  ↳ Memilih engine (JEV / Laya):
+      • JEV Cloud (Primary):
+        POST https://api.typesafe.ai/v1/systemone
+        Headers: Authorization: Bearer $TYPESAFE_API_KEY
+        Payload: {
+          "model": "jev-latest",
+          "context": "User query: \"lihat siswa nunggak kelas 8B\"",
+          "schema": {
+            "intent": {
+              "type": "choice",
+              "criteria": {
+                "LIST_MENU": "Navigasi menu umum",
+                "DIRECT_LINK": "Filter data tabel spesifik",
+                "REPORT_ACTION": "Cetak / unduh rapot"
+              }
+            }
+          }
+        }
+        Response: intent = "DIRECT_LINK" (Prob: 1.0)
+
+      • Laya Local MLX (Fallback / Local):
+        POST http://127.0.0.1:4141/embed
+        Payload: { "text": "lihat siswa nunggak kelas 8B" }
+        Response: Dense Vector [768 dimensions]
+        Proses: Menghitung Cosine Similarity vs anchors.json + Softmax (T=0.05)
+
+     │
+     ▼
+[Step 2: Slot / Parameter Extraction]
+  ↳ File: service-search/src/extractor.ts
+  ↳ Parsing regex & semantic dictionary:
+      • Regex `\b([789]|1[0-2])\s*([A-Za-z])\b`  ➔ kelas: "8B"
+      • Keyword Dictionary `nunggak|belum bayar`  ➔ status: "nunggak"
+  ↳ Output: { kelas: "8B", status: "nunggak" }
+
+     │
+     ▼
+[Step 3: Action Dispatching]
+  ↳ File: service-search/src/dispatcher.ts
+  ↳ Memetakan Intent `DIRECT_LINK` + parameter `spp/nunggak`:
+      • target_url = "/spp?status=nunggak&kelas=8B"
+      • title = "Data Tagihan & Pembayaran SPP - Kelas 8B"
+  ↳ Output JSON dikirim kembali ke App Pendidikan Backend
+
+     │
+     ▼
+[Step 4: Query Database SQLite]
+  ↳ File: app-education/src/server.ts (:3000)
+  ↳ Client/Browser membuka target_url: GET /api/spp?status=nunggak&kelas=8B
+  ↳ Server mengeksekusi parameterized query ke SQLite (education.db):
+      ```sql
+      SELECT id, siswa_id, nama_siswa, kelas, bulan, nominal, status, jatuh_tempo 
+      FROM spp 
+      WHERE 1=1 
+        AND LOWER(status) = LOWER('nunggak') 
+        AND LOWER(kelas) = LOWER('8B');
+      ```
+  ↳ Database Return:
+      - Budi Santoso (Rp 500.000, nunggak)
+      - Farhan Nugraha (Rp 500.000, nunggak)
+
+---
+
+## 9. Kesimpulan & Rekomendasi Produksi
 
 1. **Gunakan TypeSafe JEV untuk Produksi:**
    - Menghilangkan beban pengelolaan dan pelabelan *anchor sentences*.
