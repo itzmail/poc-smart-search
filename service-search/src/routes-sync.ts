@@ -11,8 +11,22 @@ export interface AppRoute {
   icon?: string;
   keywords: string[];
   supported_intents: string[];
-  filter_keys: string[];
+  allowed_params?: string[];
+  filter_keys?: string[]; // backward compat (deprecated)
   client_id?: string;
+}
+
+// Konteks kalender akademik aktif dari app (sumber kebenaran waktu relatif)
+export interface ActiveContext {
+  today: string;
+  bulan_label: string;
+  tahun_ajaran: string;
+  semester: string;
+}
+
+export interface RoutesManifest {
+  routes: AppRoute[];
+  active_context?: ActiveContext;
 }
 
 export interface ResolvedEntity {
@@ -36,7 +50,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Statistik umum sekolah, total siswa, dan ringkasan pembayaran",
     keywords: ["home", "beranda", "dashboard", "utama", "statistik"],
     supported_intents: ["LIST_MENU"],
-    filter_keys: [],
+    allowed_params: [],
   },
   {
     id: "siswa",
@@ -45,7 +59,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Daftar data induk siswa, profil murid, filter kelas dan status",
     keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["kelas", "status", "q"],
+    allowed_params: ["kelas", "status", "q"],
   },
   {
     id: "nilai",
@@ -54,7 +68,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Buku nilai siswa, rekap nilai harian, PTS, PAS, per mata pelajaran",
     keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["kelas", "semester", "mapel"],
+    allowed_params: ["kelas", "semester", "mapel"],
   },
   {
     id: "spp",
@@ -63,7 +77,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah, kas keuangan",
     keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "invoice"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["status", "kelas"],
+    allowed_params: ["status", "kelas", "periode"],
   },
   {
     id: "rapot",
@@ -72,7 +86,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Aksi cetak dokumen rapor, unduh PDF rapor per siswa atau per kelas",
     keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
     supported_intents: ["LIST_MENU", "REPORT_ACTION"],
-    filter_keys: ["kelas", "semester", "format", "nama"],
+    allowed_params: ["kelas", "semester", "format", "nama"],
   },
   {
     id: "kelas",
@@ -81,15 +95,15 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Data ruang kelas, rombel, dan wali kelas",
     keywords: ["kelas", "ruang kelas", "rombel", "wali kelas"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["id", "tingkat"],
+    allowed_params: ["id", "tingkat"],
   },
 ];
 
-export async function getActiveRoutes(
+export async function getRoutesManifest(
   clientId: string = "1",
   role: string = "SUPERADMIN",
   forceRefresh = false
-): Promise<AppRoute[]> {
+): Promise<RoutesManifest> {
   const routesCacheKey = `smartsearch:routes:${clientId}:${role.toUpperCase()}`;
 
   // 1. Cek dari Cache Redis dulu (per client_id dan per role)
@@ -97,7 +111,13 @@ export async function getActiveRoutes(
     const cached = await cacheGet(routesCacheKey);
     if (cached) {
       try {
-        return JSON.parse(cached);
+        const parsed = JSON.parse(cached);
+        // Format baru: { routes, active_context }
+        if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.routes)) {
+          return { routes: parsed.routes, active_context: parsed.active_context };
+        }
+        // Format lama (array routes saja)
+        if (Array.isArray(parsed)) return { routes: parsed };
       } catch {}
     }
   }
@@ -115,8 +135,12 @@ export async function getActiveRoutes(
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.routes) && data.routes.length > 0) {
-        await cacheSet(routesCacheKey, JSON.stringify(data.routes), DEFAULT_TTL_SECONDS);
-        return data.routes;
+        const manifest: RoutesManifest = {
+          routes: data.routes,
+          active_context: data.active_context,
+        };
+        await cacheSet(routesCacheKey, JSON.stringify(manifest), DEFAULT_TTL_SECONDS);
+        return manifest;
       }
     }
   } catch {
@@ -124,8 +148,19 @@ export async function getActiveRoutes(
   }
 
   // 3. Fallback ke memory lokal jika backend belum dapat dijangkau
-  await cacheSet(routesCacheKey, JSON.stringify(FALLBACK_ROUTES), DEFAULT_TTL_SECONDS);
-  return FALLBACK_ROUTES;
+  const fallbackManifest: RoutesManifest = { routes: FALLBACK_ROUTES };
+  await cacheSet(routesCacheKey, JSON.stringify(fallbackManifest), DEFAULT_TTL_SECONDS);
+  return fallbackManifest;
+}
+
+// Backward-compat wrapper: kembalikan hanya array routes
+export async function getActiveRoutes(
+  clientId: string = "1",
+  role: string = "SUPERADMIN",
+  forceRefresh = false
+): Promise<AppRoute[]> {
+  const manifest = await getRoutesManifest(clientId, role, forceRefresh);
+  return manifest.routes;
 }
 
 // Entity Resolver: Mencari kelas, invoice, siswa dari database app melalui API

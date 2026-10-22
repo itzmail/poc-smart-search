@@ -64,7 +64,7 @@ export function dispatchAction(
           target_type: "DETAIL",
           title: `Detail ${matchedEntity.name}`,
           description: `Buka halaman informasi dan daftar siswa ${matchedEntity.name}`,
-          destination: matchedEntity.detail_url,
+          destination: matchedEntity.detail_url || matchedEntity.list_url,
           entity: {
             type: "kelas",
             id: matchedEntity.id,
@@ -102,7 +102,7 @@ export function dispatchAction(
           target_type: "DETAIL",
           title: `Invoice ${matchedEntity.name}`,
           description: `Buka rincian tagihan pembayaran SPP`,
-          destination: matchedEntity.detail_url,
+          destination: matchedEntity.detail_url || matchedEntity.list_url,
           entity: {
             type: "invoice",
             id: matchedEntity.id,
@@ -208,35 +208,56 @@ export function dispatchAction(
     } else {
       // 1B. DIRECT_LINK Tanpa Entitas Master Khusus (Filter Biasa ke Modul)
       const candidateRoutes = dynamicRoutes.filter((r) => r.supported_intents.includes("DIRECT_LINK"));
-      let selectedRoute = candidateRoutes.find((r) => r.id === "siswa") || dynamicRoutes[0];
+
+      // Prioritas 1: Route yang ditunjuk AI (JEV semantic route selection)
+      const aiRoute = classification.target_route
+        ? candidateRoutes.find((r) => r.id === classification.target_route)
+        : undefined;
+
+      let selectedRoute = aiRoute || candidateRoutes.find((r) => r.id === "siswa") || dynamicRoutes[0];
       let maxScore = 0;
 
-      for (const r of candidateRoutes) {
-        let score = 0;
-        for (const k of r.keywords) {
-          if (qLower.includes(k.toLowerCase())) {
-            score += ["nunggak", "tagihan", "spp", "bayar", "nilai", "ulangan", "akademik"].includes(k.toLowerCase()) ? 5 : 1;
+      // Prioritas 2 (fallback Laya / tanpa target_route): keyword scoring
+      if (!aiRoute) {
+        for (const r of candidateRoutes) {
+          let score = 0;
+          for (const k of r.keywords) {
+            if (qLower.includes(k.toLowerCase())) {
+              score += ["nunggak", "tagihan", "spp", "bayar", "nilai", "ulangan", "akademik"].includes(k.toLowerCase()) ? 5 : 1;
+            }
           }
-        }
-        if (score > maxScore) {
-          maxScore = score;
-          selectedRoute = r;
+          if (score > maxScore) {
+            maxScore = score;
+            selectedRoute = r;
+          }
         }
       }
 
+      // Route-Scoped: hanya kirim param yang diakui route terpilih (allowed_params)
+      const allowedParams = selectedRoute.allowed_params || selectedRoute.filter_keys || [];
       const qParams = new URLSearchParams();
-      if (params.status) qParams.set("status", params.status);
-      if (params.kelas) qParams.set("kelas", params.kelas);
-      if (params.semester) qParams.set("semester", params.semester);
-      if (params.mapel) qParams.set("mapel", params.mapel);
+      if (params.status && allowedParams.includes("status")) qParams.set("status", params.status);
+      if (params.kelas && allowedParams.includes("kelas")) qParams.set("kelas", params.kelas);
+      if (params.semester && allowedParams.includes("semester")) qParams.set("semester", params.semester);
+      if (params.mapel && allowedParams.includes("mapel")) qParams.set("mapel", params.mapel);
+      if (params.periode && allowedParams.includes("periode")) qParams.set("periode", params.periode);
       const qs = qParams.toString();
+
+      const periodeLabel =
+        params.periode === "hari_ini"
+          ? " (Hari Ini)"
+          : params.periode === "bulan_ini"
+            ? " (Bulan Ini)"
+            : params.periode === "tahun_ini"
+              ? " (Tahun Ini)"
+              : "";
 
       options.push({
         rank: 1,
         score: directLinkProb,
         intent: "DIRECT_LINK",
         target_type: "LIST",
-        title: `${selectedRoute.title}${params.kelas ? " - Kelas " + params.kelas : ""}`,
+        title: `${selectedRoute.title}${params.kelas ? " - Kelas " + params.kelas : ""}${periodeLabel}`,
         description: `Buka tabel ${selectedRoute.title.toLowerCase()} dengan filter query`,
         destination: qs ? `${selectedRoute.path}?${qs}` : selectedRoute.path,
       });
@@ -254,7 +275,6 @@ export function dispatchAction(
       if (params.semester) dlParams.set("semester", params.semester);
       if (params.format) dlParams.set("format", params.format);
       if (params.nama) dlParams.set("nama", params.nama);
-
       options.push({
         rank: options.length + 1,
         score: reportProb,

@@ -5,7 +5,7 @@ import { extractParams } from "./extractor.js";
 import { dispatchAction, type SmartSearchResponse } from "./dispatcher.js";
 import { printSearchProcess } from "./visualizer.js";
 import { cacheGet, cacheSet, DEFAULT_TTL_SECONDS, getCacheStatus } from "./cache/redis.js";
-import { getActiveRoutes, resolveEntities } from "./routes-sync.js";
+import { getRoutesManifest, resolveEntities } from "./routes-sync.js";
 
 const PORT = parseInt(process.env.SEARCH_PORT || "4000", 10);
 
@@ -40,7 +40,7 @@ const server = http.createServer(async (req, res) => {
   if (parsedUrl.pathname === "/routes/refresh" && req.method === "POST") {
     const clientId = (req.headers["x-client-id"] || "1").toString();
     const role = (req.headers["x-user-role"] || "SUPERADMIN").toString();
-    const refreshed = await getActiveRoutes(clientId, role, true);
+    const manifest = await getRoutesManifest(clientId, role, true);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
@@ -48,8 +48,9 @@ const server = http.createServer(async (req, res) => {
         message: "Dynamic routes refreshed into Redis cache",
         client_id: clientId,
         role,
-        total_routes: refreshed.length,
-        routes: refreshed.map((r) => r.path),
+        active_context: manifest.active_context || null,
+        total_routes: manifest.routes.length,
+        routes: manifest.routes.map((r) => r.path),
       })
     );
     return;
@@ -124,16 +125,31 @@ const server = http.createServer(async (req, res) => {
       } catch {}
     }
 
-    // 2. QUERY BELUM DI CACHE: Klasifikasi AI + Entity Lookup + ACL Routes
+    // 2. QUERY BELUM DI CACHE: Routes + Entity Lookup (paralel), lalu Klasifikasi AI
     try {
       const startTime = performance.now();
-      const [classification, dynamicRoutes, resolvedEntities] = await Promise.all([
-        classifyIntent(trimmedQuery, engine),
-        getActiveRoutes(clientId, userRole),
+      const [manifest, resolvedEntities] = await Promise.all([
+        getRoutesManifest(clientId, userRole),
         resolveEntities(trimmedQuery, clientId),
       ]);
+      const dynamicRoutes = manifest.routes;
 
-      const params = extractParams(trimmedQuery);
+      // Kirim daftar route + description ke JEV agar AI memilih target_route semantik
+      const classification = await classifyIntent(
+        trimmedQuery,
+        engine,
+        dynamicRoutes.map((r) => ({ id: r.id, title: r.title, description: r.description, path: r.path }))
+      );
+
+      // Route-Scoped Lazy Extraction: hanya jalankan regex utk allowed_params route terpilih
+      const selectedRoute = classification.target_route
+        ? dynamicRoutes.find((r) => r.id === classification.target_route)
+        : undefined;
+      const params = extractParams(trimmedQuery, {
+        allowedParams: selectedRoute?.allowed_params || selectedRoute?.filter_keys,
+        activeContext: manifest.active_context,
+      });
+
       const response = dispatchAction(
         trimmedQuery,
         classification,

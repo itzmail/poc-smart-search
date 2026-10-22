@@ -18,38 +18,60 @@ function sendJson(res: http.ServerResponse, statusCode: number, data: any) {
 }
 
 // Semantic overlay per job code (huruf kecil)
-const JOB_METADATA: Record<string, { keywords: string[]; supported_intents: string[]; filter_keys: string[] }> = {
+// allowed_params = kontrak resmi query param yang diakui route ini.
+// service-search hanya mengeksekusi extractor untuk param yang terdaftar di sini (Route-Scoped Lazy Extraction).
+const JOB_METADATA: Record<string, { keywords: string[]; supported_intents: string[]; allowed_params: string[] }> = {
   dashboard: {
     keywords: ["home", "beranda", "dashboard", "utama", "statistik"],
     supported_intents: ["LIST_MENU"],
-    filter_keys: [],
+    allowed_params: [],
   },
   siswa: {
     keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["kelas", "status", "q"],
+    allowed_params: ["kelas", "status", "q"],
   },
   nilai: {
     keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["kelas", "semester", "mapel"],
+    allowed_params: ["kelas", "semester", "mapel"],
   },
   spp: {
     keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah", "invoice"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["status", "kelas", "invoice_id"],
+    allowed_params: ["kelas", "status", "periode", "invoice_id"],
   },
   rapot: {
     keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
     supported_intents: ["LIST_MENU", "REPORT_ACTION"],
-    filter_keys: ["kelas", "semester", "format", "nama"],
+    allowed_params: ["kelas", "semester", "format", "nama"],
   },
   kelas: {
     keywords: ["kelas", "ruang kelas", "rombel", "wali kelas", "tingkat"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    filter_keys: ["id", "tingkat"],
+    allowed_params: ["id", "tingkat"],
   },
 };
+
+// Konteks kalender akademik aktif per tenant.
+// Sumber kebenaran untuk query waktu relatif: "tahun ajaran ini", "semester ini", "bulan ini", "hari ini".
+function getActiveContext() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1; // 1-12
+
+  // Tahun ajaran baru dimulai Juli (bulan 7): Jul-Des => ganjil (y/y+1), Jan-Jun => genap (y-1/y)
+  const isGanjil = month >= 7;
+  const academicYear = isGanjil ? `${year}/${year + 1}` : `${year - 1}/${year}`;
+
+  const monthName = now.toLocaleString("id-ID", { month: "long" });
+  return {
+    today: now.toISOString().slice(0, 10),
+    bulan_label: `${monthName} ${year}`,
+    tahun_ajaran: academicYear,
+    semester: isGanjil ? "ganjil" : "genap",
+  };
+}
 
 const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || "/", `http://localhost:${PORT}`);
@@ -88,13 +110,14 @@ const server = http.createServer(async (req, res) => {
       client_id: string;
     }>;
 
-    // Transformasi Pintro Job menjadi manifest route
+    // Transformasi Pintro Job menjadi manifest route (dengan kontrak allowed_params)
+    const activeContext = getActiveContext();
     const routes = permittedJobs.map((j) => {
       const codeLower = j.code.toLowerCase();
       const meta = JOB_METADATA[codeLower] || {
         keywords: [j.name.toLowerCase(), codeLower],
         supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-        filter_keys: [],
+        allowed_params: [] as string[],
       };
 
       return {
@@ -107,7 +130,8 @@ const server = http.createServer(async (req, res) => {
         description: `Modul ${j.name} (Client: ${j.client_id})`,
         keywords: meta.keywords,
         supported_intents: meta.supported_intents,
-        filter_keys: meta.filter_keys,
+        allowed_params: meta.allowed_params,
+        filter_keys: meta.allowed_params, // backward compat
         client_id: j.client_id,
       };
     });
@@ -116,6 +140,7 @@ const server = http.createServer(async (req, res) => {
       service: "app-education",
       client_id: clientId,
       user_role: userRole,
+      active_context: activeContext,
       total_permitted_routes: routes.length,
       routes,
     });
@@ -227,9 +252,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Tambah token individual panjang >= 3 karakter
+    // Stopword diperluas: kata tanya, waktu relatif, & kata aksi umum agar tidak
+    // salah terdeteksi sebagai nama siswa (mis. "ini" nyaris cocok dgn "Anggraini")
+    const STOPWORDS = new Set([
+      "aku", "ingin", "tahu", "nama", "anak", "ada", "yang", "dan", "dari", "kelas", "mana", "saja",
+      "bisa", "buat", "lihat", "cek", "ini", "itu", "belum", "sudah", "bayar", "bulan", "hari", "tahun",
+      "ajaran", "pelajaran", "nunggak", "lunas", "tagihan", "tunggakan", "cetak", "semua", "daftar",
+      "rekap", "total", "berapa", "tolong", "tunjukkan", "buka", "data", "status", "siapa", "apakah",
+      "periode", "aktif", "semester",
+    ]);
     q.split(/\s+/).forEach((w) => {
       const clean = w.replace(/[^a-z0-9]/gi, "");
-      if (clean.length >= 3 && !["aku", "ingin", "tahu", "nama", "anak", "ada", "yang", "dan", "dari", "kelas", "mana", "saja", "bisa", "buat", "lihat", "cek"].includes(clean)) {
+      if (clean.length >= 3 && !STOPWORDS.has(clean)) {
         if (!candidateTokens.includes(clean)) candidateTokens.push(clean);
       }
     });
@@ -359,6 +393,7 @@ const server = http.createServer(async (req, res) => {
     const status = qParams.get("status");
     const kelas = qParams.get("kelas");
     const kelasId = qParams.get("kelas_id");
+    const periode = qParams.get("periode"); // hari_ini | bulan_ini
 
     let sql = "SELECT id, siswa_id, nama_siswa, kelas, bulan, nominal, status, jatuh_tempo, client_id FROM spp WHERE client_id = ?";
     const params: string[] = [clientId];
@@ -367,6 +402,14 @@ const server = http.createServer(async (req, res) => {
       sql += " AND LOWER(status) = LOWER(?)";
       params.push(status);
     }
+
+    // Filter waktu relatif dihitung server-side (TIDAK ditebak oleh AI)
+    if (periode === "hari_ini") {
+      sql += " AND date(jatuh_tempo) = date('now', 'localtime')";
+    } else if (periode === "bulan_ini") {
+      sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime')";
+    }
+
     if (kelasId) {
       sql += " AND (LOWER(kelas) = LOWER(?) OR id IN (SELECT id FROM spp WHERE kelas = ?))";
       // Fallback matching kelas kode
@@ -385,7 +428,8 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       module: "Tagihan & Pembayaran SPP",
       client_id: clientId,
-      filters_applied: { status, kelas: kelasId || kelas },
+      filters_applied: { status, kelas: kelasId || kelas, periode: periode || null },
+      active_context: getActiveContext(),
       total_tunggakan: totalTunggakan,
       count: rows.length,
       data: rows,

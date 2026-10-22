@@ -490,7 +490,73 @@ Sistem telah diuji dan dilengkapi pemahaman pertanyaan bisnis bahasa manusia:
 
 ---
 
-## 12. Kesimpulan & Rekomendasi Produksi
+## 12. Route-Scoped Lazy Extraction & Konteks Waktu Relatif
+
+Dua peningkatan arsitektur agar sistem tetap efisien ketika jumlah modul bertambah, dan mampu menjawab pertanyaan berbasis waktu (*"siapa yang belum bayar bulan ini?"*):
+
+### 1. Kontrak `allowed_params` di Setiap Route
+
+Saat `service-search` melakukan sinkronisasi, setiap route kini membawa **kontrak resmi parameter** yang diakui modulnya:
+
+```json
+{
+  "id": "spp",
+  "title": "Pembayaran & Tagihan SPP",
+  "path": "/spp",
+  "description": "Modul Pembayaran & Tagihan SPP (Client: 1)",
+  "allowed_params": ["kelas", "status", "periode", "invoice_id"]
+}
+```
+
+* **Efisiensi**: Regex/extractor hanya dijalankan untuk parameter yang terdaftar di route terpilih (lazy extraction). Route `/kelas` tidak akan pernah memicu regex status bayar atau periode waktu.
+* **Skalabel**: Menambah modul baru tidak menambah beban ekstraksi modul lain.
+
+### 2. JEV Memilih Route via `description` (Semantic Route Selection)
+
+JEV Cloud kini menerima **multi-question** dalam satu request: `(1) intent` + `(2) target_route`. Daftar route + deskripsinya dikirim sebagai *semantic criteria* tanpa anchor, sehingga AI langsung menunjuk modul yang paling cocok:
+
+```json
+{
+  "state": "siapa siswa yang belum bayar bulan ini",
+  "questions": {
+    "intent":  { "type": "choice", "criteria": { "LIST_MENU": "...", "DIRECT_LINK": "...", "REPORT_ACTION": "..." } },
+    "target_route": { "type": "choice", "criteria": {
+      "spp": "Menu \"Pembayaran & Tagihan SPP\" di path /spp: Modul tagihan...",
+      "siswa": "Menu \"Master Data Siswa\" di path /siswa: ..."
+    } }
+  }
+}
+```
+
+* JEV hanya **menunjuk** route terbaik (`target_route: "spp"`) — nilai param-nya **tidak digenerate AI**.
+* Laya (engine lokal) tetap memakai keyword scoring sebagai fallback pemilihan route.
+
+### 3. Resolusi Waktu Relatif dari Kalender Aktif (Bukan Ditebak AI)
+
+Kata waktu relatif (*"hari ini"*, *"bulan ini"*, *"tahun ajaran ini"*) **tidak boleh ditebak oleh AI** karena setiap tenant punya kalender akademik berbeda. Solusinya dua lapis:
+
+1. **`active_context` dikirim app**: `GET /api/routes` menyertakan kalender aktif tenant (dihitung server): `tahun_ajaran` (maju Juli), `semester`, `bulan_label`, `today`.
+2. **Filter dieksekusi server database**: `GET /api/spp` menerima `periode=hari_ini|bulan_ini` dan menghitungnya via SQL tanggal (`strftime('%Y-%m', jatuh_tempo)`), bukan dari tebakan model.
+
+```mermaid
+flowchart LR
+    Q[Query: 'belum bayar bulan ini'] --> J[JEV: target_route = spp]
+    J --> S[Route-Scoped Extractor<br/>allowed_params spp: kelas, status, periode]
+    S --> P[periode = bulan_ini<br/>status = nunggak]
+    P --> A[GET /spp?status=nunggak&periode=bulan_ini]
+    A --> D[(SQLite:<br/>strftime bulan berjalan)]
+```
+
+| Kata di Query | Hasil Ekstraksi | Sumber Nilai |
+|---|---|---|
+| "hari ini" | `periode=hari_ini` | Dihitung SQL `date('now')` saat eksekusi |
+| "bulan ini" | `periode=bulan_ini` | Dihitung SQL `strftime('%Y-%m')` saat eksekusi |
+| "tahun ajaran ini" | `tahun_ajaran=2026/2027` | `active_context` dari app tenant |
+| "semester ini" | `semester=ganjil` | `active_context` dari app tenant |
+
+---
+
+## 13. Kesimpulan & Rekomendasi Produksi
 
 1. **Gunakan TypeSafe JEV untuk Produksi:**
    - Menghilangkan beban pengelolaan dan pelabelan *anchor sentences*.

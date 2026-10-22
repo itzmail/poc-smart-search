@@ -114,6 +114,32 @@ async function runE2E() {
   const hasRekap = rTelat.options.some((o: any) => o.destination.includes("status=nunggak"));
   console.log(hasRekap ? pc.green("   ✔ Berhasil: Memunculkan rekap tunggakan per kelas (8B dan 9A).") : pc.red("   ✘ Gagal agregasi"));
 
+  // 9. Test Query Waktu Relatif: "siapa siswa yang belum bayar bulan ini"
+  console.log(pc.bold("\n9. Testing Query Waktu Relatif: 'siapa siswa yang belum bayar bulan ini'"));
+  const rBulanIni = await (
+    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("siapa siswa yang belum bayar bulan ini")}&engine=jev`, {
+      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
+    })
+  ).json();
+  console.log(`   Total Options: ${pc.cyan(rBulanIni.total_options)}`);
+  rBulanIni.options.forEach((opt: any) => {
+    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
+  });
+  const hasPeriode = rBulanIni.options[0]?.destination.includes("periode=bulan_ini");
+  console.log(hasPeriode ? pc.green("   ✔ Berhasil: Filter waktu relatif 'bulan ini' dikirim ke route SPP (periode=bulan_ini).") : pc.red("   ✘ Gagal periode bulan ini"));
+
+  // 10. Test Route Manifest: active_context & allowed_params
+  console.log(pc.bold("\n10. Testing Route Manifest: 'active_context' & 'allowed_params'"));
+  const rManifest = await (
+    await fetch(`${APP_URL}/api/routes`, { headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" } })
+  ).json();
+  console.log(`   Active Context: ${pc.cyan(JSON.stringify(rManifest.active_context))}`);
+  const sppRoute = rManifest.routes.find((r: any) => r.id === "spp");
+  console.log(`   Route SPP allowed_params: ${pc.cyan(JSON.stringify(sppRoute?.allowed_params))}`);
+  const ctxOk = rManifest.active_context?.tahun_ajaran && rManifest.active_context?.semester;
+  const paramsOk = sppRoute?.allowed_params?.includes("periode");
+  console.log(ctxOk && paramsOk ? pc.green("   ✔ Berhasil: App mengirim konteks kalender akademik aktif + kontrak allowed_params.") : pc.red("   ✘ Gagal manifest"));
+
   console.log(pc.bold(pc.green("\n🎉 SEMUA FITUR STANDARDIZED ARRAY, DETAIL vs LIST & THRESHOLD TERVERIFIKASI 100%!\n")));
 }
 

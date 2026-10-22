@@ -133,6 +133,12 @@ export function initDatabase() {
   // Seed Menu/Job jika kosong
   const jobCount = db.query("SELECT COUNT(id) as count FROM job").get() as { count: number };
   if (jobCount.count === 0) {
+    // Label bulan berjalan (dinamis, mengikuti kalender saat seeding) agar
+    // filter waktu relatif "bulan ini" / "hari ini" di smart search selalu relevan
+    const now = new Date();
+    const monthName = now.toLocaleString("id-ID", { month: "long" });
+    const bulanLabel = `${monthName} ${now.getFullYear()}`;
+    const jatuhTempo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-10`;
     const insertJob = db.prepare(`
       INSERT INTO job (id, code, name, parent, ordering, display, icon, client_id) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -213,10 +219,10 @@ export function initDatabase() {
       INSERT INTO invoice (id, invoice_no, siswa_id, nama_siswa, kelas_id, bulan, nominal, status, client_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertInvoice.run("INV-2024-10-001", "INV/2024/10/001", "S001", "Budi Santoso", "K-08B", "Oktober 2024", 500000, "nunggak", "1");
-    insertInvoice.run("INV-2024-10-002", "INV/2024/10/002", "S002", "Siti Rahma", "K-08B", "Oktober 2024", 500000, "lunas", "1");
-    insertInvoice.run("INV-2024-10-003", "INV/2024/10/003", "S006", "Farhan Nugraha", "K-08B", "Oktober 2024", 500000, "nunggak", "1");
-    insertInvoice.run("INV-2024-10-004", "INV/2024/10/004", "S005", "Rian Hidayat", "K-09A", "Oktober 2024", 550000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-001", "INV/2024/10/001", "S001", "Budi Santoso", "K-08B", bulanLabel, 500000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-002", "INV/2024/10/002", "S002", "Siti Rahma", "K-08B", bulanLabel, 500000, "lunas", "1");
+    insertInvoice.run("INV-2024-10-003", "INV/2024/10/003", "S006", "Farhan Nugraha", "K-08B", bulanLabel, 500000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-004", "INV/2024/10/004", "S005", "Rian Hidayat", "K-09A", bulanLabel, 550000, "nunggak", "1");
     // Tenant 2
     insertInvoice.run("INV-2024-10-005", "INV/2024/10/005", "S008", "Santri Zaid", "K-10A_T2", "Oktober 2024", 750000, "nunggak", "2");
 
@@ -261,13 +267,13 @@ export function initDatabase() {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const sppList = [
-      ["SPP001", "S001", "Budi Santoso", "8B", "Oktober 2024", 500000, "nunggak", "2024-10-10", "1"],
-      ["SPP002", "S002", "Siti Rahma", "8B", "Oktober 2024", 500000, "lunas", "2024-10-10", "1"],
-      ["SPP003", "S006", "Farhan Nugraha", "8B", "Oktober 2024", 500000, "nunggak", "2024-10-10", "1"],
-      ["SPP004", "S005", "Rian Hidayat", "9A", "Oktober 2024", 550000, "nunggak", "2024-10-10", "1"],
-      ["SPP005", "S003", "Ahmad Dahlan", "7A", "Oktober 2024", 450000, "lunas", "2024-10-10", "1"],
+      ["SPP001", "S001", "Budi Santoso", "8B", bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
+      ["SPP002", "S002", "Siti Rahma", "8B", bulanLabel, 500000, "lunas", jatuhTempo, "1"],
+      ["SPP003", "S006", "Farhan Nugraha", "8B", bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
+      ["SPP004", "S005", "Rian Hidayat", "9A", bulanLabel, 550000, "nunggak", jatuhTempo, "1"],
+      ["SPP005", "S003", "Ahmad Dahlan", "7A", bulanLabel, 450000, "lunas", jatuhTempo, "1"],
       // Tenant 2
-      ["SPP006", "S008", "Santri Zaid", "10A", "Oktober 2024", 750000, "nunggak", "2024-10-10", "2"],
+      ["SPP006", "S008", "Santri Zaid", "10A", bulanLabel, 750000, "nunggak", jatuhTempo, "2"],
     ];
     for (const sp of sppList) {
       insertSPP.run(...sp);
