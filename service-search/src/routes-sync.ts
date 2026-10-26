@@ -1,6 +1,23 @@
 import pc from "picocolors";
 import { cacheGet, cacheSet, DEFAULT_TTL_SECONDS } from "./cache/redis.js";
 
+// Kontrak descriptor satu query-param yang dikenali sebuah route.
+// Sumber kebenaran: kolom JSON `search_routes.allowed_params` (tabel DB).
+// mode:
+//   "list"   -> master list kecil, dicocokkan ke token query (butuh endpoint)
+//   "search" -> pencarian entity per-token via query_param (butuh endpoint)
+//   "enum"   -> nilai dari regex DB (values) atau semantic fallback (tanpa endpoint)
+export interface ParamSpec {
+  key: string;
+  endpoint?: string;
+  mode?: "list" | "search" | "enum";
+  query_param?: string;
+  match_field?: string;
+  resolves_to?: string;
+  hint_regex?: string;
+  values?: Record<string, string>;
+}
+
 export interface AppRoute {
   id: string;
   job_id?: string;
@@ -11,8 +28,7 @@ export interface AppRoute {
   icon?: string;
   keywords: string[];
   supported_intents: string[];
-  allowed_params?: string[];
-  filter_keys?: string[]; // backward compat (deprecated)
+  allowed_params?: ParamSpec[];
   client_id?: string;
 }
 
@@ -22,6 +38,7 @@ export interface ActiveContext {
   bulan_label: string;
   tahun_ajaran: string;
   semester: string;
+  academic_year_id?: string;
 }
 
 export interface RoutesManifest {
@@ -59,7 +76,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Daftar data induk siswa, profil murid, filter kelas dan status",
     keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["kelas", "status", "q"],
+    allowed_params: [],
   },
   {
     id: "nilai",
@@ -68,7 +85,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Buku nilai siswa, rekap nilai harian, PTS, PAS, per mata pelajaran",
     keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["kelas", "semester", "mapel"],
+    allowed_params: [],
   },
   {
     id: "spp",
@@ -77,7 +94,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah, kas keuangan",
     keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "invoice"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["status", "kelas", "periode"],
+    allowed_params: [],
   },
   {
     id: "rapot",
@@ -86,7 +103,7 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Aksi cetak dokumen rapor, unduh PDF rapor per siswa atau per kelas",
     keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
     supported_intents: ["LIST_MENU", "REPORT_ACTION"],
-    allowed_params: ["kelas", "semester", "format", "nama"],
+    allowed_params: [],
   },
   {
     id: "kelas",
@@ -95,14 +112,15 @@ const FALLBACK_ROUTES: AppRoute[] = [
     description: "Data ruang kelas, rombel, dan wali kelas",
     keywords: ["kelas", "ruang kelas", "rombel", "wali kelas"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["id", "tingkat"],
+    allowed_params: [],
   },
 ];
 
 export async function getRoutesManifest(
   clientId: string = "1",
   role: string = "SUPERADMIN",
-  forceRefresh = false
+  forceRefresh = false,
+  auth?: string
 ): Promise<RoutesManifest> {
   const routesCacheKey = `smartsearch:routes:${clientId}:${role.toUpperCase()}`;
 
@@ -128,6 +146,7 @@ export async function getRoutesManifest(
       headers: {
         "X-Client-Id": clientId,
         "X-User-Role": role,
+        ...(auth ? { Authorization: auth } : {}),
       },
       signal: AbortSignal.timeout(1500),
     });

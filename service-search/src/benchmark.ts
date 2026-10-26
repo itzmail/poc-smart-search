@@ -1,6 +1,6 @@
 import pc from "picocolors";
 import { classifyIntent } from "./classifier.js";
-import { extractParams } from "./extractor.js";
+import { extractRawParams } from "./extractor.js";
 import { dispatchAction } from "./dispatcher.js";
 import { getActiveRoutes } from "./routes-sync.js";
 
@@ -33,8 +33,8 @@ const TEST_CASES: TestCase[] = [
   { query: "cetak rapor semester genap", expected: "REPORT_ACTION" },
 ];
 
-async function runBenchmarkForEngine(engineName: "jev" | "laya") {
-  const engineTitle = engineName === "jev" ? "TypeSafe JEV Cloud (System One)" : "Laya Local Daemon (MLX :4141)";
+async function runBenchmarkForEngine(engineName: "jev" | "local") {
+  const engineTitle = engineName === "jev" ? "TypeSafe JEV Cloud (System One)" : "Transformers.js Local (In-Process, ONNX q8)";
   console.log(pc.bold(pc.cyan(`\n🧪 BENCHMARK ENGINE: ${engineTitle}`)));
   console.log(`Total sample queries: ${TEST_CASES.length}\n`);
 
@@ -49,8 +49,9 @@ async function runBenchmarkForEngine(engineName: "jev" | "laya") {
   for (let i = 0; i < TEST_CASES.length; i++) {
     const tc = TEST_CASES[i];
     const classification = await classifyIntent(tc.query, engineName);
-    const params = extractParams(tc.query);
-    const response = dispatchAction(tc.query, classification, params, dynamicRoutes, [], 0.2);
+    const route = classification.target_route ? dynamicRoutes.find((r) => r.id === classification.target_route) : undefined;
+    const extraction = extractRawParams(tc.query, route?.allowed_params || []);
+    const response = dispatchAction(tc.query, classification, extraction, route, dynamicRoutes, [], 0.2);
 
     const isMatch = classification.intent === tc.expected;
     if (isMatch) correctCount++;
@@ -86,7 +87,7 @@ async function main() {
   console.log(pc.bold(pc.yellow("=========================================================================")));
 
   const jevResult = await runBenchmarkForEngine("jev");
-  const layaResult = await runBenchmarkForEngine("laya");
+  const layaResult = await runBenchmarkForEngine("local");
 
   console.log("\n" + pc.bold(pc.cyan("📋 TABEL PERBANDINGAN AKHIR:")));
   console.log("┌──────────────────────────┬──────────┬─────────────┬────────────────────┐");
@@ -97,7 +98,7 @@ async function main() {
       "│"
   );
   console.log(
-    `│ ${pc.bold("Laya-MLX (Local Daemon)")}  │ ${String(layaResult.accuracy + "%").padEnd(8)} │ ${String(layaResult.avgLatency + " ms").padEnd(11)} │ ${Math.min(...layaResult.latencies)}ms – ${Math.max(...layaResult.latencies)}ms`.padEnd(52) +
+    `│ ${pc.bold("Transformers.js (Local In-Process)")}  │ ${String(layaResult.accuracy + "%").padEnd(8)} │ ${String(layaResult.avgLatency + " ms").padEnd(11)} │ ${Math.min(...layaResult.latencies)}ms – ${Math.max(...layaResult.latencies)}ms`.padEnd(52) +
       "│"
   );
   console.log("└──────────────────────────┴──────────┴─────────────┴────────────────────┘\n");

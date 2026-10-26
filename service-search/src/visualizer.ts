@@ -1,7 +1,16 @@
 import pc from "picocolors";
 import type { ClassificationResult } from "./classifier.js";
-import type { ExtractedParams } from "./extractor.js";
 import type { SmartSearchResponse } from "./dispatcher.js";
+import type { ParamSpec } from "./routes-sync.js";
+import type { ResolvedParam } from "./lazy-resolver.js";
+
+interface PipelineDebug extends Record<string, any> {
+  query?: string;
+  tokens?: string[];
+  enumValues?: Record<string, string>;
+  allowed_params?: ParamSpec[];
+  resolved?: ResolvedParam[];
+}
 
 function getProgressBar(prob: number, width = 16): string {
   const filled = Math.round(prob * width);
@@ -12,7 +21,7 @@ function getProgressBar(prob: number, width = 16): string {
 export function printSearchProcess(
   query: string,
   classification: ClassificationResult,
-  params: ExtractedParams,
+  debug: PipelineDebug,
   response: SmartSearchResponse
 ) {
   const { intent, engine, latency_ms, probabilities } = classification;
@@ -20,43 +29,38 @@ export function printSearchProcess(
   const engineBadge =
     engine === "JEV_CLOUD"
       ? pc.bold(pc.cyan("⚡ TYPE-SAFE JEV (Cloud System One)"))
-      : pc.bold(pc.magenta("⚡ LAYA-MLX (Local Daemon :4141)"));
+      : pc.bold(pc.magenta("⚡ TRANSFORMERS.JS (In-Process Local)"));
 
-  console.log("\n" + pc.dim("━".repeat(70)));
+  console.log("\n" + pc.dim("━".repeat(78)));
   console.log(`${pc.bold(pc.white("🔍 SMART SEARCH QUERY:"))} "${pc.yellow(query)}"`);
-  console.log(`⚙️  ENGINE: ${engineBadge} | LATENCY: ${pc.green(latency_ms + "ms")}`);
-  console.log(pc.dim("─".repeat(70)));
+  console.log(`⚙️  ENGINE: ${engineBadge} | LATENCY: ${pc.green(latency_ms + "ms")} | ROUTE: ${pc.bold(pc.yellow(response.target_route || "-"))}`);
+  console.log(pc.dim("─".repeat(78)));
 
   console.log(pc.bold("📊 INTENT PROBABILITIES:"));
-  const sortedIntents = Object.entries(probabilities).sort(([, a], [, b]) => b - a);
-
-  for (const [it, prob] of sortedIntents) {
+  for (const [it, prob] of Object.entries(probabilities).sort(([, a], [, b]) => b - a) as [string, number][]) {
     const isTop = it === intent;
-    const bar = getProgressBar(prob);
-    const pct = `${Math.round(prob * 100)}%`.padStart(4);
-    const label = it.padEnd(14);
-    const line = `${bar} ${pct} ${label}`;
+    const line = getProgressBar(prob) + ` ${(`${Math.round(prob * 100)}%`).padStart(4)} ${it.padEnd(16)}`;
+    console.log(isTop ? `▸ ${pc.bold(pc.green(line))}` : `  ${pc.dim(line)}`);
+  }
 
-    if (isTop) {
-      console.log(`▸ ${pc.bold(pc.green(line))}`);
-    } else {
-      console.log(`  ${pc.dim(line)}`);
+  console.log(pc.dim("─".repeat(78)));
+
+  // Scoped allowed_params (from DB config)
+  console.log(pc.bold(`🔧 ALLOWED PARAMS (route-scoped): ${debug.allowed_params?.map((p) => p.key).join(", ") || "-"}`));
+
+  // Lazy-resolved params (API fetch + Redis)
+  if (debug.resolved?.length) {
+    console.log(pc.bold(`✅ RESOLVED PARAMS:`));
+    for (const r of debug.resolved) {
+      const src = pc.dim(`[${r.source}]`);
+      const vals = r.values.map((v) => `${v.id}(${v.name})`).join(", ") || pc.bold(pc.yellow(debug.enumValues?.[r.spec.key] || ""));
+      console.log(`   • ${pc.cyan(r.spec.key)} ${src} ${vals}`);
     }
-  }
-
-  console.log(pc.dim("─".repeat(70)));
-
-  const paramEntries = Object.entries(params).filter(([, v]) => !!v);
-  if (paramEntries.length > 0) {
-    const paramStr = paramEntries
-      .map(([k, v]) => `${pc.cyan(k)}: ${pc.bold(pc.yellow(v))}`)
-      .join(" | ");
-    console.log(`🎯 EXTRACTED PARAMETERS: ${paramStr}`);
   } else {
-    console.log(`🎯 EXTRACTED PARAMETERS: ${pc.dim("(none / general)")}`);
+    console.log(pc.dim(`✅ RESOLVED PARAMS: (none)`));
   }
 
-  console.log(pc.dim("─".repeat(70)));
+  console.log(pc.dim("─".repeat(78)));
   console.log(`🚀 STANDARDIZED OPTIONS (Threshold: ${response.threshold * 100}% | Total: ${response.total_options})`);
 
   response.options.forEach((opt) => {
@@ -71,10 +75,11 @@ export function printSearchProcess(
       `  [#${opt.rank}] ${targetBadge} ${pc.bold(opt.title)} ${pc.dim(`(Score: ${Math.round(opt.score * 100)}%)`)}`
     );
     console.log(`      ↳ Dest: ${pc.cyan(opt.destination)}`);
-    if (opt.entity) {
-      console.log(`      ↳ Entity: ${pc.yellow(opt.entity.type)} [${opt.entity.id}] ${opt.entity.name}`);
+    if (opt.data) {
+      const dataStr = JSON.stringify(opt.data);
+      console.log(`      ↳ Data: ${pc.dim(dataStr.length > 160 ? dataStr.slice(0, 160) + "..." : dataStr)}`);
     }
   });
 
-  console.log(pc.dim("━".repeat(70)) + "\n");
+  console.log(pc.dim("━".repeat(78)) + "\n");
 }

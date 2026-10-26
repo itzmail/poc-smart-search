@@ -1,6 +1,7 @@
 import type { ClassificationResult, IntentType } from "./classifier.js";
-import type { ExtractedParams } from "./extractor.js";
-import { type AppRoute, type ResolvedEntity } from "./routes-sync.js";
+import type { RawExtraction } from "./extractor.js";
+import type { AppRoute, ParamSpec } from "./routes-sync.js";
+import { indexResolvedParams, type ResolvedParam } from "./lazy-resolver.js";
 
 export type TargetType = "DETAIL" | "LIST" | "ACTION";
 
@@ -12,12 +13,9 @@ export interface SearchOption {
   title: string;
   description: string;
   destination: string;
-  entity?: {
-    type: "kelas" | "invoice" | "siswa" | "agregasi";
-    id: string;
-    code?: string;
-    name: string;
-  };
+  // Payload terstruktur per entitas (multi-entity disambiguation)
+  // contoh: { entity_role: "siswa", siswa: {...}, kelas: {...} }
+  data?: Record<string, any>;
 }
 
 export interface SmartSearchResponse {
@@ -25,303 +23,264 @@ export interface SmartSearchResponse {
   query: string;
   client_id?: string;
   user_role?: string;
-  engine: "JEV_CLOUD" | "LAYA_LOCAL";
+  engine: "JEV_CLOUD" | "LOCAL_TRANSFORMERS";
   latency_ms: number;
   cached?: boolean;
   threshold: number;
+  target_route?: string;
+  allowed_params?: ParamSpec[];
+  resolved_params?: Record<string, any[]>;
   total_options: number;
   options: SearchOption[];
+}
+
+const r2 = (n: number) => Math.min(1, Math.round(n * 100) / 100); // clamp 0..1
+
+function siswaLabel(s: Record<string, any>): string {
+  return s?.nama || s?.nama_siswa || s?.id || "";
+}
+
+function kelasName(k: Record<string, any>): string {
+  return k?.name || (k?.code ? `Kelas ${String(k.code).toUpperCase()}` : "") || "";
 }
 
 export function dispatchAction(
   query: string,
   classification: ClassificationResult,
-  params: ExtractedParams,
-  dynamicRoutes: AppRoute[] = [],
-  resolvedEntities: ResolvedEntity[] = [],
+  extraction: RawExtraction,
+  selectedRoute: AppRoute | undefined,
+  dynamicRoutes: AppRoute[],
+  resolved: ResolvedParam[],
   threshold: number = 0.2
 ): SmartSearchResponse {
   const { probabilities, engine, latency_ms } = classification;
   const qLower = query.toLowerCase();
-
-  const isExplicitDetail = /\b(detail|buka|profil|ruang)\b/i.test(qLower);
-  const isExplicitList = /\b(daftar|tabel|semua|lihat|rekap|nunggak|tagihan|lunas)\b/i.test(qLower);
-
-  const matchedEntity = resolvedEntities[0];
+  const params = indexResolvedParams(resolved);
   const options: SearchOption[] = [];
 
-  // 1. EVALUASI INTENT DIRECT_LINK
-  const directLinkProb = probabilities.DIRECT_LINK || 0;
-  if (directLinkProb >= threshold) {
-    // 1A. Jika ada Entitas Kelas / Invoice / Siswa yang terdeteksi
-    if (matchedEntity) {
-      if (matchedEntity.type === "kelas") {
-        // Option 1: Detail Kelas
-        options.push({
-          rank: 1,
-          score: Math.round((isExplicitDetail ? directLinkProb * 1.1 : directLinkProb * 0.95) * 100) / 100,
-          intent: "DIRECT_LINK",
-          target_type: "DETAIL",
-          title: `Detail ${matchedEntity.name}`,
-          description: `Buka halaman informasi dan daftar siswa ${matchedEntity.name}`,
-          destination: matchedEntity.detail_url || matchedEntity.list_url,
-          entity: {
-            type: "kelas",
-            id: matchedEntity.id,
-            code: matchedEntity.code,
-            name: matchedEntity.name,
-          },
-        });
+  const route = selectedRoute || dynamicRoutes[0];
+  const directProb = probabilities.DIRECT_LINK || 0;
+  const actionProb = probabilities.REPORT_ACTION || 0;
+  const menuProb = probabilities.LIST_MENU || 0;
 
-        // Option 2: List SPP / Siswa Terfilter Kelas Ini
-        const sppRoute = dynamicRoutes.find((r) => r.id === "spp");
-        if (sppRoute) {
-          const qs = params.status ? `?kelas_id=${matchedEntity.id}&status=${params.status}` : `?kelas_id=${matchedEntity.id}`;
-          options.push({
-            rank: 2,
-            score: Math.round((isExplicitList ? directLinkProb * 1.15 : directLinkProb * 0.85) * 100) / 100,
-            intent: "DIRECT_LINK",
-            target_type: "LIST",
-            title: `Tagihan SPP - ${matchedEntity.name}${params.status ? ` (${params.status.toUpperCase()})` : ""}`,
-            description: `Buka tabel tagihan SPP untuk ${matchedEntity.name}`,
-            destination: `/spp${qs}`,
-            entity: {
-              type: "kelas",
-              id: matchedEntity.id,
-              code: matchedEntity.code,
-              name: matchedEntity.name,
-            },
-          });
-        }
-      } else if (matchedEntity.type === "invoice") {
-        // Detail Invoice Tagihan SPP
-        options.push({
-          rank: 1,
-          score: directLinkProb,
-          intent: "DIRECT_LINK",
-          target_type: "DETAIL",
-          title: `Invoice ${matchedEntity.name}`,
-          description: `Buka rincian tagihan pembayaran SPP`,
-          destination: matchedEntity.detail_url || matchedEntity.list_url,
-          entity: {
-            type: "invoice",
-            id: matchedEntity.id,
-            name: matchedEntity.name,
-          },
-        });
-      } else if (matchedEntity.type === "agregasi") {
-        // Kasus: "kelas mana saja yang telat bayar"
-        // Option 1: Rekap Utama SPP Nunggak
-        options.push({
-          rank: 1,
-          score: directLinkProb,
-          intent: "DIRECT_LINK",
-          target_type: "LIST",
-          title: matchedEntity.name,
-          description: `Buka modul SPP dengan filter semua siswa status nunggak`,
-          destination: matchedEntity.list_url,
-          entity: {
-            type: "agregasi",
-            id: matchedEntity.id,
-            name: matchedEntity.name,
-          },
-        });
+  if (route) {
+    // --- 1. Entity-driven DIRECT_LINK options (siswa / wali_kelas / kelas) ---
+    const siswaResolved = params["siswa_id"];
+    const waliResolved = params["wali_kelas"];
+    const kelasResolved = params["kelas_id"];
 
-        // Option 2 & 3: Breakdown per Kelas yang Nunggak
-        const classes = matchedEntity.meta?.classes || [];
-        classes.slice(0, 3).forEach((cls: any, i: number) => {
-          options.push({
-            rank: options.length + 1,
-            score: Math.round((directLinkProb - 0.05 * (i + 1)) * 100) / 100,
-            intent: "DIRECT_LINK",
-            target_type: "LIST",
-            title: `Daftar Tunggakan ${cls.name} (${cls.total_nunggak} Siswa)`,
-            description: `Filter siswa nunggak khusus ${cls.name} (Total: Rp ${cls.total_nominal?.toLocaleString("id-ID")})`,
-            destination: `/spp?status=nunggak&kelas_id=${cls.kelas_id}`,
-            entity: {
-              type: "kelas",
-              id: cls.kelas_id,
-              code: cls.code,
-              name: cls.name,
-            },
-          });
-        });
-      } else if (matchedEntity.type === "siswa") {
-        const isAskingClass = /\b(kelas|ruang|di\s*mana)\b/i.test(qLower);
-        const isAskingBill = /\b(tagihan|bayar|spp|invoice|biaya|lunas|nunggak)\b/i.test(qLower);
+    const isAskingClass = /\b(kelas|ruang|di\s*mana|kelas\s*berapa)\b/i.test(qLower);
+    const isWaliContext = /\b(wali|ibu|bu\s|pak\b|bapak|guru)\b/i.test(qLower);
 
-        // Jika user bertanya: "anak siti ada di kelas mana", Ruang Kelas naik ke Rank #1
-        if (isAskingClass && matchedEntity.meta?.kelas_id) {
-          options.push({
-            rank: 1,
-            score: Math.round((directLinkProb * 1.05) * 100) / 100,
-            intent: "DIRECT_LINK",
-            target_type: "DETAIL",
-            title: `Ruang Kelas ${matchedEntity.meta.kelas} (${matchedEntity.name})`,
-            description: `Buka informasi ruang kelas ${matchedEntity.meta.kelas} tempat ${matchedEntity.name} belajar`,
-            destination: matchedEntity.meta.kelas_detail_url || `/kelas/${matchedEntity.meta.kelas_id}`,
-            entity: {
-              type: "kelas",
-              id: matchedEntity.meta.kelas_id,
-              name: `Kelas ${matchedEntity.meta.kelas}`,
-            },
-          });
-        }
+    // 1A. Route "kelas": setiap match siswa = option kelas-nya +
+    //     setiap match wali_kelas = option kelas sebagai homeroom teacher
+    if (route.id === "kelas") {
+      const siswaMatches = siswaResolved?.values.filter((v) => v.kelas_id || v.raw?.kelas_id) || [];
+      // Urut: siswa match terbaik dari bertanya kelas; jika konteks wali, guru dulu
+      const waliMatches = waliResolved?.values || [];
 
-        // Opsi Profil Siswa
+      const pushKelasOption = (
+        entity_role: "siswa" | "wali_kelas",
+        siswa: Record<string, any> | null,
+        wali: Record<string, any> | null,
+        kelas: Record<string, any>,
+        score: number
+      ) => {
         options.push({
           rank: options.length + 1,
-          score: isAskingClass ? Math.round(directLinkProb * 0.9 * 100) / 100 : directLinkProb,
+          score: r2(score),
           intent: "DIRECT_LINK",
           target_type: "DETAIL",
-          title: `Profil Siswa: ${matchedEntity.name}`,
-          description: `Biodata lengkap ${matchedEntity.name} (Kelas ${matchedEntity.meta?.kelas || "-"})`,
-          destination: matchedEntity.detail_url || `/siswa/${matchedEntity.id}`,
-          entity: {
-            type: "siswa",
-            id: matchedEntity.id,
-            name: matchedEntity.name,
+          title:
+            entity_role === "siswa"
+              ? `${kelasName(kelas)} — ${siswaLabel(siswa!)} (Siswa)`
+              : `${kelasName(kelas)} — ${wali?.wali_kelas || wali?.name || ""} (Wali Kelas)`,
+          description:
+            entity_role === "siswa"
+              ? `${siswaLabel(siswa!)} terdaftar sebagai siswa di ${kelasName(kelas)}`
+              : `${wali?.wali_kelas || wali?.name || ""} adalah wali kelas ${kelasName(kelas)}`,
+          destination: `/kelas/${kelas.id}`,
+          data: {
+            entity_role,
+            ...(siswa ? { siswa: { id: siswa.id, nisn: siswa.nisn || siswa.raw?.nisn, nama: siswaLabel(siswa), kelas: siswa.kelas } } : {}),
+            ...(wali ? { wali_kelas: { nama: wali.wali_kelas || wali.name } } : {}),
+            kelas: { id: kelas.id, code: kelas.code || kelas.raw?.code, name: kelas.name },
           },
         });
+      };
 
-        // Opsi Invoice Siswa jika ada dan ROLE MEMILIKI IZIN KE SPP/INVOICE
-        const hasSppAccess = dynamicRoutes.some((r) => r.id === "spp" || r.path.startsWith("/spp"));
-        const invoices = matchedEntity.meta?.invoices || [];
-        if (hasSppAccess && invoices.length > 0) {
-          const inv = invoices[0];
-          options.push({
-            rank: options.length + 1,
-            score: isAskingBill ? Math.round(directLinkProb * 1.1 * 100) / 100 : Math.round(directLinkProb * 0.75 * 100) / 100,
-            intent: "DIRECT_LINK",
-            target_type: "DETAIL",
-            title: `Tagihan SPP: ${inv.invoice_no} (${matchedEntity.name})`,
-            description: `Rincian tagihan status ${inv.status.toUpperCase()} (Rp ${inv.nominal?.toLocaleString("id-ID")})`,
-            destination: `/spp/invoice/${inv.id}`,
-            entity: {
-              type: "invoice",
-              id: inv.id,
-              name: `Invoice ${inv.invoice_no}`,
-            },
-          });
-        }
-      }
-    } else {
-      // 1B. DIRECT_LINK Tanpa Entitas Master Khusus (Filter Biasa ke Modul)
-      const candidateRoutes = dynamicRoutes.filter((r) => r.supported_intents.includes("DIRECT_LINK"));
-
-      // Prioritas 1: Route yang ditunjuk AI (JEV semantic route selection)
-      const aiRoute = classification.target_route
-        ? candidateRoutes.find((r) => r.id === classification.target_route)
-        : undefined;
-
-      let selectedRoute = aiRoute || candidateRoutes.find((r) => r.id === "siswa") || dynamicRoutes[0];
-      let maxScore = 0;
-
-      // Prioritas 2 (fallback Laya / tanpa target_route): keyword scoring
-      if (!aiRoute) {
-        for (const r of candidateRoutes) {
-          let score = 0;
-          for (const k of r.keywords) {
-            if (qLower.includes(k.toLowerCase())) {
-              score += ["nunggak", "tagihan", "spp", "bayar", "nilai", "ulangan", "akademik"].includes(k.toLowerCase()) ? 5 : 1;
-            }
-          }
-          if (score > maxScore) {
-            maxScore = score;
-            selectedRoute = r;
-          }
-        }
+      for (const s of siswaMatches.slice(0, 8)) {
+        const kelasId = s.kelas_id || s.raw?.kelas_id;
+        const kelasItem = (kelasResolved?.values || []).find((k) => k.id === kelasId);
+        const kelas = kelasItem
+          ? { id: kelasItem.id, code: kelasItem.code, name: kelasItem.name }
+          : { id: kelasId, code: s.kelas, name: s.kelas ? `Kelas ${s.kelas}` : "" };
+        // Match siswa: prioritas wali context jika ditanya "wali kelas mana"
+        const score = isWaliContext ? directProb * 0.95 : directProb * (isAskingClass ? 1.05 : 1.0);
+        pushKelasOption("siswa", s.raw, null, kelas, score);
       }
 
-      // Route-Scoped: hanya kirim param yang diakui route terpilih (allowed_params)
-      const allowedParams = selectedRoute.allowed_params || selectedRoute.filter_keys || [];
-      const qParams = new URLSearchParams();
-      if (params.status && allowedParams.includes("status")) qParams.set("status", params.status);
-      if (params.kelas && allowedParams.includes("kelas")) qParams.set("kelas", params.kelas);
-      if (params.semester && allowedParams.includes("semester")) qParams.set("semester", params.semester);
-      if (params.mapel && allowedParams.includes("mapel")) qParams.set("mapel", params.mapel);
-      if (params.periode && allowedParams.includes("periode")) qParams.set("periode", params.periode);
-      const qs = qParams.toString();
-
-      const periodeLabel =
-        params.periode === "hari_ini"
-          ? " (Hari Ini)"
-          : params.periode === "bulan_ini"
-            ? " (Bulan Ini)"
-            : params.periode === "tahun_ini"
-              ? " (Tahun Ini)"
-              : "";
-
-      options.push({
-        rank: 1,
-        score: directLinkProb,
-        intent: "DIRECT_LINK",
-        target_type: "LIST",
-        title: `${selectedRoute.title}${params.kelas ? " - Kelas " + params.kelas : ""}${periodeLabel}`,
-        description: `Buka tabel ${selectedRoute.title.toLowerCase()} dengan filter query`,
-        destination: qs ? `${selectedRoute.path}?${qs}` : selectedRoute.path,
-      });
+      for (const w of waliMatches.slice(0, 4)) {
+        const score = isWaliContext ? directProb * 1.05 : directProb * 0.85;
+        pushKelasOption("wali_kelas", null, w, { id: w.id, code: w.code, name: w.name }, score);
+      }
     }
-  }
 
-  // 2. EVALUASI INTENT REPORT_ACTION
-  const reportProb = probabilities.REPORT_ACTION || 0;
-  if (reportProb >= threshold) {
-    const hasRapotAccess = dynamicRoutes.some((r) => r.id === "rapot" || r.supported_intents.includes("REPORT_ACTION"));
-    if (hasRapotAccess) {
-      const isPrint = qLower.includes("cetak") || qLower.includes("print");
-      const dlParams = new URLSearchParams();
-      if (params.kelas) dlParams.set("kelas", params.kelas);
-      if (params.semester) dlParams.set("semester", params.semester);
-      if (params.format) dlParams.set("format", params.format);
-      if (params.nama) dlParams.set("nama", params.nama);
+    // 1B. Route "siswa": profil siswa per match
+    if (route.id === "siswa" && siswaResolved?.values.length) {
+      for (const s of siswaResolved.values.slice(0, 8)) {
+        options.push({
+          rank: options.length + 1,
+          score: r2(directProb),
+          intent: "DIRECT_LINK",
+          target_type: "DETAIL",
+          title: `Profil Siswa: ${siswaLabel(s.raw)}`,
+          description: `Biodata ${siswaLabel(s.raw)} (Kelas ${s.kelas || s.raw?.kelas || "-"})`,
+          destination: `/siswa/${s.id}`,
+          data: {
+            entity_role: "siswa",
+            siswa: { id: s.id, nisn: s.nisn || s.raw?.nisn, nama: siswaLabel(s.raw), kelas: s.kelas || s.raw?.kelas, kelas_id: s.kelas_id || s.raw?.kelas_id },
+          },
+        });
+      }
+    }
+
+    // 1C. SPP/nilai/rapot: LIST route dengan query params dari resolved values
+    const isListRoute = ["spp", "siswa", "nilai", "dashboard"].includes(route.id) && options.length === 0;
+
+    if (isListRoute) {
+      const qs = new URLSearchParams();
+      for (const spec of route.allowed_params || []) {
+        // mode search (siswa_id): ditangani terpisah sebagai ?q=<nama depan entitas>
+        if (spec.mode === "search") continue;
+        const rp = params[spec.key];
+        if (!rp) continue;
+        if (rp.source === "enum" || rp.source === "semantic") {
+          // enum: label dari DB config, langsung dipasang
+          const v = extraction.enumValues[spec.key];
+          if (v) qs.set(spec.key, v);
+        } else if (rp.values[0]) {
+          // selain enum: pakai id master (FK) — mis. kelas_id=K-08B
+          qs.set(spec.key, rp.values[0].id);
+        }
+      }
+      // Entity search (siswa): backend list menerima query nama (bukan FK siswa_id)
+      if (siswaResolved?.values[0] && (route.allowed_params || []).some((s) => s.mode === "search")) {
+        const s = siswaResolved.values[0];
+        const firstToken = siswaLabel(s.raw).split(/\s+/)[0];
+        if (firstToken) qs.set("q", firstToken);
+      }
+      const qsStr = qs.toString();
+
+      // Label human-readable utk tahun ajaran (dari active_context)
+      const ayResolved = params["academic_year_id"];
+      const statusResolved = qs.get("status");
+      const kelasLabel = params["kelas_id"]?.values[0]?.name;
+
       options.push({
         rank: options.length + 1,
-        score: reportProb,
-        intent: "REPORT_ACTION",
-        target_type: "ACTION",
-        title: `${isPrint ? "Cetak" : "Unduh"} Rapot (${params.kelas ? "Kelas " + params.kelas : "Semua Kelas"})`,
-        description: `Generate dokumen rapor resmi format ${params.format?.toUpperCase() || "PDF"}`,
-        destination: `/api/rapot/download?${dlParams.toString()}`,
+        score: r2(directProb),
+        intent: "DIRECT_LINK",
+        target_type: "LIST",
+        title: [
+          route.title,
+          statusResolved ? `Status ${statusResolved.toUpperCase()}` : "",
+          kelasLabel ? kelasLabel : "",
+          ayResolved?.values[0]?.name ? `TA ${ayResolved.values[0].name}` : "",
+        ]
+          .filter(Boolean)
+          .join(" — "),
+        description: `Buka ${route.title.toLowerCase()}${statusResolved ? ` dengan filter status ${statusResolved}` : ""}${ayResolved?.values[0]?.name ? ` tahun ajaran ${ayResolved.values[0].name}` : ""}`,
+        destination: qsStr ? `${route.path}?${qsStr}` : route.path,
+        data: {
+          route: route.id,
+          filters: Object.fromEntries(qs.entries()),
+        },
+      });
+
+      // Tambah opsi alternatif tanpa filter waktu, jika user menyebut periode/tahun
+      if (qs.get("academic_year_id") || qs.get("periode")) {
+        const alt = new URLSearchParams(qs);
+        alt.delete("periode");
+        alt.delete("academic_year_id");
+        options.push({
+          rank: options.length + 1,
+          score: r2(directProb * 0.85),
+          intent: "DIRECT_LINK",
+          target_type: "LIST",
+          title: `${route.title} — Semua Periode`,
+          description: `Buka ${route.title.toLowerCase()} tanpa filter periode/tahun`,
+          destination: alt.toString() ? `${route.path}?${alt.toString()}` : route.path,
+          data: { route: route.id, filters: Object.fromEntries(alt.entries()) },
+        });
+      }
+    }
+
+    // 1D. Route "kelas" tanpa entity match — LIST master kelas biasa
+    if (route.id === "kelas" && options.length === 0) {
+      options.push({
+        rank: options.length + 1,
+        score: r2(directProb),
+        intent: "DIRECT_LINK",
+        target_type: "LIST",
+        title: route.title,
+        description: route.description,
+        destination: route.path,
+        data: { route: route.id },
       });
     }
   }
 
-  // 3. EVALUASI INTENT LIST_MENU
-  const menuProb = probabilities.LIST_MENU || 0;
-  if (menuProb >= threshold || options.length === 0) {
-    const matchedRoutes = dynamicRoutes.filter((r) =>
-      r.keywords.some((k) => qLower.includes(k.toLowerCase())) ||
-      r.title.toLowerCase().includes(qLower)
-    );
+  // --- 2. EVALUASI INTENT REPORT_ACTION (rapot) ---
+  if (route?.id === "rapot" && actionProb >= threshold) {
+    const dlParams = new URLSearchParams();
+    for (const spec of route.allowed_params || []) {
+      const rp = params[spec.key];
+      if (!rp) continue;
+      if (rp.source === "enum" || rp.source === "semantic") {
+        const v = extraction.enumValues[spec.key];
+        if (v) dlParams.set(spec.key, v);
+      } else if (rp.values[0]) {
+        // rapot pakai kelas nama (e.g. 8B) — sementara dari master name/code
+        dlParams.set(spec.key, rp.values[0].code || rp.values[0].name || rp.values[0].id);
+      }
+    }
+    const isPrint = /cetak|print/i.test(qLower);
+    options.push({
+      rank: options.length + 1,
+      score: r2(actionProb),
+      intent: "REPORT_ACTION",
+      target_type: "ACTION",
+      title: `${isPrint ? "Cetak" : "Unduh"} Rapot${params["kelas_id"]?.values[0] ? ` (${params["kelas_id"]!.values[0].name})` : ""}`,
+      description: `Generate dokumen rapor format ${(extraction.enumValues.format || "pdf").toUpperCase()}`,
+      destination: `/api/rapot/download?${dlParams.toString()}`,
+      data: { route: "rapot", filters: Object.fromEntries(dlParams.entries()) },
+    });
+  }
 
-    const routesToShow = matchedRoutes.length > 0 ? matchedRoutes : dynamicRoutes.slice(0, 3);
+  // --- 3. EVALUASI INTENT LIST_MENU (fallback navigasi) ---
+  if (menuProb >= threshold || options.length === 0) {
+    const matchedRoutes = dynamicRoutes.filter(
+      (r) => r.keywords.some((k) => qLower.includes(k.toLowerCase())) || r.title.toLowerCase().includes(qLower)
+    );
+    const routesToShow = matchedRoutes.length > 0 ? matchedRoutes.slice(0, 4) : dynamicRoutes.slice(0, 3);
     for (const r of routesToShow) {
       options.push({
         rank: options.length + 1,
-        score: Math.round(menuProb * 100) / 100,
+        score: r2(menuProb),
         intent: "LIST_MENU",
         target_type: "LIST",
         title: r.title,
         description: r.description,
         destination: r.path,
+        data: { route: r.id },
       });
     }
   }
 
-  // Filter threshold, izin ACL route, & ranking pengurutan opsi
-  // Pastikan SEMUA opsi yang keluar diizinkan oleh dynamicRoutes (ACL Role)
-  const isDestinationPermitted = (dest: string) => {
-    const cleanPath = "/" + dest.replace(/^\//, "").split("?")[0].split("/")[0];
-    // Route file action rapot selalu dicek ke route rapot
-    if (cleanPath === "/api" && dest.includes("/rapot")) {
-      return dynamicRoutes.some((r) => r.id === "rapot" || r.path.startsWith("/rapot"));
-    }
-    return dynamicRoutes.some((r) => r.path.startsWith(cleanPath) || r.id === cleanPath.replace("/", ""));
-  };
-
+  // Filter threshold & ranking
   const filteredOptions = options
-    .filter((opt) => opt.score >= threshold && isDestinationPermitted(opt.destination))
+    .filter((opt) => opt.score >= threshold)
     .sort((a, b) => b.score - a.score)
     .map((opt, idx) => ({ ...opt, rank: idx + 1 }));
 
@@ -331,7 +290,15 @@ export function dispatchAction(
     engine,
     latency_ms,
     threshold,
+    target_route: route?.id,
+    allowed_params: route?.allowed_params || [],
+    resolved_params: Object.fromEntries(
+      Object.entries(params).map(([k, v]) => [k, v.values.map((val) => ({ id: val.id, name: val.name }))])
+    ),
     total_options: filteredOptions.length,
     options: filteredOptions,
   };
 }
+
+// helper typo guard (agar tidak crash lama)
+

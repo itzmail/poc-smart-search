@@ -1,6 +1,6 @@
 import * as http from "node:http";
 import pc from "picocolors";
-import { db, initDatabase } from "./data/db.js";
+import { db, initDatabase, getSearchRoutes } from "./data/db.js";
 
 // Inisialisasi skema & tabel SQLite dengan skema Pintro (job, groups, acl, master_kelas, invoice)
 initDatabase();
@@ -17,59 +17,44 @@ function sendJson(res: http.ServerResponse, statusCode: number, data: any) {
   res.end(JSON.stringify(data, null, 2));
 }
 
-// Semantic overlay per job code (huruf kecil)
-// allowed_params = kontrak resmi query param yang diakui route ini.
-// service-search hanya mengeksekusi extractor untuk param yang terdaftar di sini (Route-Scoped Lazy Extraction).
-const JOB_METADATA: Record<string, { keywords: string[]; supported_intents: string[]; allowed_params: string[] }> = {
-  dashboard: {
-    keywords: ["home", "beranda", "dashboard", "utama", "statistik"],
-    supported_intents: ["LIST_MENU"],
-    allowed_params: [],
-  },
-  siswa: {
-    keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["kelas", "status", "q"],
-  },
-  nilai: {
-    keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["kelas", "semester", "mapel"],
-  },
-  spp: {
-    keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah", "invoice"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["kelas", "status", "periode", "invoice_id"],
-  },
-  rapot: {
-    keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
-    supported_intents: ["LIST_MENU", "REPORT_ACTION"],
-    allowed_params: ["kelas", "semester", "format", "nama"],
-  },
-  kelas: {
-    keywords: ["kelas", "ruang kelas", "rombel", "wali kelas", "tingkat"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: ["id", "tingkat"],
-  },
-};
-
 // Konteks kalender akademik aktif per tenant.
 // Sumber kebenaran untuk query waktu relatif: "tahun ajaran ini", "semester ini", "bulan ini", "hari ini".
-function getActiveContext() {
+function getActiveContext(clientId: string = "1") {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1; // 1-12
 
-  // Tahun ajaran baru dimulai Juli (bulan 7): Jul-Des => ganjil (y/y+1), Jan-Jun => genap (y-1/y)
+  // Fallback kalender jika row DB belum ter-set
   const isGanjil = month >= 7;
-  const academicYear = isGanjil ? `${year}/${year + 1}` : `${year - 1}/${year}`;
+  const fallbackYear = isGanjil ? `${year}/${year + 1}` : `${year - 1}/${year}`;
+  const fallbackSemester = isGanjil ? "ganjil" : "genap";
+
+  // Ambil tahun ajaran aktif dari DB:
+  // Prioritas 1: is_active=1 dan hari ini berada di rentang start_date..end_date
+  // Prioritas 2: is_active=1 (LIMIT 1)
+  const todayStr = now.toISOString().slice(0, 10);
+  let ay = db.query(`
+    SELECT id, name, semester FROM academic_year
+    WHERE client_id = ? AND is_active = 1 AND ? BETWEEN start_date AND end_date
+    LIMIT 1
+  `).get(clientId, todayStr) as { id: string; name: string; semester: string } | null;
+
+  if (!ay) {
+    ay = db.query(`
+      SELECT id, name, semester FROM academic_year
+      WHERE client_id = ? AND is_active = 1
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(clientId) as { id: string; name: string; semester: string } | null;
+  }
 
   const monthName = now.toLocaleString("id-ID", { month: "long" });
   return {
-    today: now.toISOString().slice(0, 10),
+    today: todayStr,
     bulan_label: `${monthName} ${year}`,
-    tahun_ajaran: academicYear,
-    semester: isGanjil ? "ganjil" : "genap",
+    tahun_ajaran: ay?.name ?? fallbackYear,
+    semester: ay?.semester ?? fallbackSemester,
+    academic_year_id: ay?.id,
   };
 }
 
@@ -82,57 +67,57 @@ const server = http.createServer(async (req, res) => {
   const clientId = (req.headers["x-client-id"] || qParams.get("client_id") || "1").toString();
   const userRole = (req.headers["x-user-role"] || qParams.get("role") || "SUPERADMIN").toString().toUpperCase();
 
-  // 0. Dynamic Route Manifest Endpoint (Filter Berdasarkan Pintro ACL: job + groups + acl)
-  // Path route MURNI diturunkan dari `/${j.code.toLowerCase()}`
+  // 0. Dynamic Route Manifest Endpoint (Filter Berdasarkan Pintro ACL: search_routes + acl + groups)
+  // Sumber kebenaran: tabel search_routes di DB, di-JOIN dengan acl & groups via getSearchRoutes()
   if (pathname === "/api/routes" || pathname === "/routes") {
     console.log(pc.dim(`[APP ACL] Fetch routes untuk Client ID: ${clientId} | Role: ${userRole}`));
 
-    const sql = `
-      SELECT j.id, j.code, j.name, j.parent, j.ordering, j.display, j.icon, j.client_id
-      FROM job j
-      JOIN acl a ON a.job_id = j.id AND a.client_id = j.client_id
-      JOIN groups g ON g.id = a.groups_id AND g.client_id = j.client_id
-      WHERE j.client_id = ? 
-        AND UPPER(g.code) = ? 
-        AND j.deleted_at IS NULL 
-        AND a.deleted_at IS NULL
-      ORDER BY j.ordering ASC
-    `;
-
-    const permittedJobs = db.query(sql).all(clientId, userRole) as Array<{
+    const rawRoutes = getSearchRoutes(clientId, userRole) as Array<{
       id: string;
+      job_id: string;
       code: string;
-      name: string;
-      parent: string | null;
-      ordering: number;
-      display: number;
-      icon: string;
+      title: string;
+      url_path: string;
+      description: string;
+      keywords: string;
+      supported_intents: string;
+      allowed_params: string;
+      is_active: number;
       client_id: string;
     }>;
 
-    // Transformasi Pintro Job menjadi manifest route (dengan kontrak allowed_params)
-    const activeContext = getActiveContext();
-    const routes = permittedJobs.map((j) => {
-      const codeLower = j.code.toLowerCase();
-      const meta = JOB_METADATA[codeLower] || {
-        keywords: [j.name.toLowerCase(), codeLower],
-        supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-        allowed_params: [] as string[],
-      };
+    const activeContext = getActiveContext(clientId);
+    const routes = rawRoutes.map((sr) => {
+      let keywords: string[] = [];
+      let supportedIntents: string[] = ["LIST_MENU", "DIRECT_LINK"];
+      let allowedParams: any[] = [];
+      try { keywords = JSON.parse(sr.keywords || "[]"); } catch {}
+      try { supportedIntents = JSON.parse(sr.supported_intents || "[]"); } catch {}
+      try {
+        allowedParams = JSON.parse(sr.allowed_params || "[]");
+        // Sanitasi dinamis: bersihkan hint_regex yang masih memuat daftar nama dummy hardcode
+        // dari seed lama agar resolver tidak membatasi nama siswa/santri/wali.
+        allowedParams = allowedParams.map((p: any) => {
+          if (p.key === "siswa_id" && p.hint_regex) {
+            // Ubah pemicu menjadi kata peran/keterangan konteks siswa secara dinamis (tanpa nama orang spesifik)
+            p.hint_regex = "\\b(siapa|siswa|student|murid|santri|anak|nama|milik|atas\\s+nama)\\b|[a-z]{3,}";
+          }
+          return p;
+        });
+      } catch {}
 
       return {
-        id: codeLower,
-        job_id: j.id,
-        job_code: j.code,
-        title: j.name,
-        path: `/${codeLower}`,
-        icon: j.icon || "layout-dashboard",
-        description: `Modul ${j.name} (Client: ${j.client_id})`,
-        keywords: meta.keywords,
-        supported_intents: meta.supported_intents,
-        allowed_params: meta.allowed_params,
-        filter_keys: meta.allowed_params, // backward compat
-        client_id: j.client_id,
+        id: sr.code,
+        job_id: sr.job_id,
+        job_code: sr.code,
+        title: sr.title,
+        path: sr.url_path,
+        icon: "layout-dashboard",
+        description: sr.description || `Modul ${sr.title} (Client: ${sr.client_id})`,
+        keywords,
+        supported_intents: supportedIntents,
+        allowed_params: allowedParams,
+        client_id: sr.client_id,
       };
     });
 
@@ -143,6 +128,56 @@ const server = http.createServer(async (req, res) => {
       active_context: activeContext,
       total_permitted_routes: routes.length,
       routes,
+    });
+  }
+
+  // 0a. Master Endpoints (per X-Client-Id) untuk lazy-resolver di service-search
+  // Mode "list" di ParamSpec merujuk ke endpoint-endpoint ini:
+  // - /api/master/academic-years -> id, name, semester, is_active
+  // - /api/master/subjects       -> id, name
+  // - /api/master/kelas          -> id, code, name, tingkat, wali_kelas
+  if (pathname === "/api/master/academic-years") {
+    const rows = db.query(`
+      SELECT id, name, semester, start_date, end_date, is_active, client_id
+      FROM academic_year
+      WHERE client_id = ?
+      ORDER BY start_date DESC
+    `).all(clientId);
+    return sendJson(res, 200, {
+      module: "Master Academic Years",
+      client_id: clientId,
+      count: rows.length,
+      data: rows,
+    });
+  }
+
+  if (pathname === "/api/master/subjects") {
+    const rows = db.query(`
+      SELECT id, name, client_id
+      FROM master_subject
+      WHERE client_id = ?
+      ORDER BY id ASC
+    `).all(clientId);
+    return sendJson(res, 200, {
+      module: "Master Subjects",
+      client_id: clientId,
+      count: rows.length,
+      data: rows,
+    });
+  }
+
+  if (pathname === "/api/master/kelas") {
+    const rows = db.query(`
+      SELECT id, code, name, tingkat, wali_kelas, client_id
+      FROM master_kelas
+      WHERE client_id = ?
+      ORDER BY tingkat ASC, code ASC
+    `).all(clientId);
+    return sendJson(res, 200, {
+      module: "Master Kelas",
+      client_id: clientId,
+      count: rows.length,
+      data: rows,
     });
   }
 
@@ -393,9 +428,10 @@ const server = http.createServer(async (req, res) => {
     const status = qParams.get("status");
     const kelas = qParams.get("kelas");
     const kelasId = qParams.get("kelas_id");
-    const periode = qParams.get("periode"); // hari_ini | bulan_ini
+    const periode = qParams.get("periode"); // hari_ini | minggu_ini | bulan_ini | bulan_lalu | tahun_ini | tahun_lalu
+    const academicYearId = qParams.get("academic_year_id");
 
-    let sql = "SELECT id, siswa_id, nama_siswa, kelas, bulan, nominal, status, jatuh_tempo, client_id FROM spp WHERE client_id = ?";
+    let sql = "SELECT id, siswa_id, nama_siswa, kelas, academic_year_id, bulan, nominal, status, jatuh_tempo, client_id FROM spp WHERE client_id = ?";
     const params: string[] = [clientId];
 
     if (status) {
@@ -403,11 +439,24 @@ const server = http.createServer(async (req, res) => {
       params.push(status);
     }
 
+    if (academicYearId) {
+      sql += " AND academic_year_id = ?";
+      params.push(academicYearId);
+    }
+
     // Filter waktu relatif dihitung server-side (TIDAK ditebak oleh AI)
     if (periode === "hari_ini") {
       sql += " AND date(jatuh_tempo) = date('now', 'localtime')";
+    } else if (periode === "minggu_ini") {
+      sql += " AND date(jatuh_tempo) BETWEEN date('now', 'localtime', '-7 days') AND date('now', 'localtime')";
     } else if (periode === "bulan_ini") {
       sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime')";
+    } else if (periode === "bulan_lalu") {
+      sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime', '-1 month')";
+    } else if (periode === "tahun_ini") {
+      sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime')";
+    } else if (periode === "tahun_lalu") {
+      sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime', '-1 year')";
     }
 
     if (kelasId) {
@@ -428,8 +477,13 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       module: "Tagihan & Pembayaran SPP",
       client_id: clientId,
-      filters_applied: { status, kelas: kelasId || kelas, periode: periode || null },
-      active_context: getActiveContext(),
+      filters_applied: {
+        status,
+        kelas: kelasId || kelas,
+        periode: periode || null,
+        academic_year_id: academicYearId || null,
+      },
+      active_context: getActiveContext(clientId),
       total_tunggakan: totalTunggakan,
       count: rows.length,
       data: rows,
@@ -439,9 +493,64 @@ const server = http.createServer(async (req, res) => {
   // 4b. Detail Invoice by ID
   if (pathname.startsWith("/api/spp/invoice/") || pathname.startsWith("/spp/invoice/")) {
     const id = pathname.replace(/^\/(api\/)?spp\/invoice\//, "");
-    const inv = db.query("SELECT id, invoice_no, siswa_id, nama_siswa, kelas_id, bulan, nominal, status, client_id FROM invoice WHERE client_id = ? AND id = ?").get(clientId, id);
+    const inv = db.query("SELECT id, invoice_no, siswa_id, nama_siswa, kelas_id, academic_year_id, bulan, nominal, status, client_id FROM invoice WHERE client_id = ? AND id = ?").get(clientId, id);
     if (!inv) return sendJson(res, 404, { error: "Invoice tidak ditemukan" });
     return sendJson(res, 200, { module: "Detail Invoice Tagihan SPP", data: inv });
+  }
+
+  // 4c. Penilaian Akademik (Nilai) Module
+  if (pathname === "/api/nilai" || pathname === "/nilai") {
+    const subjectId = qParams.get("subject_id") || qParams.get("mapel");
+    const kelasId = qParams.get("kelas_id") || qParams.get("kelas");
+    const semester = qParams.get("semester");
+    const academicYearId = qParams.get("academic_year_id");
+
+    let sql = `
+      SELECT id, siswa_id, nama_siswa, kelas, academic_year_id, mapel, semester, nilai_akhir, keterangan, client_id
+      FROM nilai
+      WHERE client_id = ?
+    `;
+    const params: string[] = [clientId];
+
+    if (subjectId) {
+      // Cocokkan ID mapel (SUB-01) atau nama mapel (Matematika)
+      const subRow = db.query("SELECT name FROM master_subject WHERE client_id = ? AND (id = ? OR LOWER(name) = LOWER(?))").get(clientId, subjectId, subjectId) as { name: string } | null;
+      const subName = subRow?.name || subjectId;
+      sql += " AND LOWER(mapel) LIKE LOWER(?)";
+      params.push(`%${subName}%`);
+    }
+
+    if (kelasId) {
+      const clean = kelasId.replace(/^K-0?/, "").toLowerCase();
+      sql += " AND (LOWER(kelas) = LOWER(?) OR LOWER(kelas) = LOWER(?))";
+      params.push(kelasId, clean);
+    }
+
+    if (semester) {
+      sql += " AND LOWER(semester) = LOWER(?)";
+      params.push(semester);
+    }
+
+    if (academicYearId) {
+      sql += " AND academic_year_id = ?";
+      params.push(academicYearId);
+    }
+
+    sql += " ORDER BY id ASC";
+    const rows = db.query(sql).all(...params) as any[];
+
+    return sendJson(res, 200, {
+      module: "Penilaian Akademik Siswa",
+      client_id: clientId,
+      filters_applied: {
+        subject_id: subjectId || null,
+        kelas_id: kelasId || null,
+        semester: semester || null,
+        academic_year_id: academicYearId || null,
+      },
+      count: rows.length,
+      data: rows,
+    });
   }
 
   // 5. Rapot Module
@@ -540,3 +649,15 @@ server.listen(PORT, () => {
   console.log(`   • GET /api/spp/invoice/:id (Detail Invoice)`);
   console.log(`   • GET /api/search?q=query&threshold=0.2 (Multi-Option Search Gateway)\n`);
 });
+
+// Graceful shutdown: tutup port saat Ctrl+C (SIGINT) atau SIGTERM
+const shutdown = () => {
+  console.log(pc.yellow("\n🛑 [App Pendidikan] Menghentikan server dan melepas port..."));
+  server.close(() => {
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 1000).unref();
+};
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

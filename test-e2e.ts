@@ -1,146 +1,158 @@
 import pc from "picocolors";
+import * as fs from "node:fs";
 
 const APP_URL = "http://127.0.0.1:3000";
 const SEARCH_URL = "http://127.0.0.1:4000";
 
-async function runE2E() {
-  console.log(pc.bold(pc.cyan("\n🚀 MENJALANKAN TEST INTEGRASI E2E: ENTITY RESOLVER & MULTI-OPTION ARRAY\n")));
-
-  // 1. Check Search Service
-  console.log(pc.bold("1. Memeriksa Service Search (:4000)..."));
-  try {
-    const sRes = await fetch(`${SEARCH_URL}/health`);
-    if (!sRes.ok) throw new Error(`HTTP ${sRes.status}`);
-    const sData = await sRes.json();
-    console.log(pc.green(`   ✔ Service Search Siap: ${JSON.stringify(sData)}`));
-  } catch (err: any) {
-    console.error(pc.red(`   ✘ Service Search belum aktif di port 4000: ${err.message}`));
-    process.exit(1);
+let failures = 0;
+function check(label: string, ok: boolean, detail = "") {
+  if (ok) console.log(pc.green(`   ✔ ${label}`) + (detail ? pc.dim(`  ${detail}`) : ""));
+  else {
+    failures++;
+    console.error(pc.red(`   ✘ ${label}`) + (detail ? pc.dim(`  ${detail}`) : ""));
   }
-
-  // 2. Check App Education + Entity Resolver Endpoint
-  console.log(pc.bold("\n2. Memeriksa App Backend & Entity Resolver (:3000)..."));
-  try {
-    const rKelas = await (await fetch(`${APP_URL}/api/master/resolve?q=8B`, { headers: { "X-Client-Id": "1" } })).json();
-    const rInv = await (await fetch(`${APP_URL}/api/master/resolve?q=INV-001`, { headers: { "X-Client-Id": "1" } })).json();
-    console.log(pc.green(`   ✔ Entity Resolver Siap:`));
-    console.log(`     • '8B' ➔ ${rKelas.entities[0]?.type}: [${rKelas.entities[0]?.id}] ${rKelas.entities[0]?.name}`);
-    console.log(`     • 'INV-001' ➔ ${rInv.entities[0]?.type}: [${rInv.entities[0]?.id}] ${rInv.entities[0]?.name}`);
-  } catch (err: any) {
-    console.error(pc.red(`   ✘ App Backend belum aktif di port 3000: ${err.message}`));
-    process.exit(1);
-  }
-
-  // 3. Test Skenario Ambigu: "kelas 8B" (Harus mengembalikan MULTI-OPTION ARRAY: DETAIL & LIST)
-  console.log(pc.bold("\n3. Testing Skenario Ambigu: 'kelas 8B' (Multi-Option DETAIL & LIST)"));
-  const rAmbigu = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.2&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  console.log(`   Total Options: ${pc.cyan(rAmbigu.total_options)} opsi ditemukan (Threshold: ${rAmbigu.threshold * 100}%)`);
-  rAmbigu.options.forEach((opt: any) => {
-    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
-  });
-  const hasDetail = rAmbigu.options.some((o: any) => o.target_type === "DETAIL");
-  const hasList = rAmbigu.options.some((o: any) => o.target_type === "LIST");
-  console.log(hasDetail && hasList ? pc.green("   ✔ Berhasil: Tersedia opsi DETAIL (/kelas/K-08B) dan LIST (/spp?kelas_id=K-08B).") : pc.red("   ✘ Gagal"));
-
-  // 4. Test Skenario List Spesifik: "lihat siswa nunggak kelas 8B"
-  console.log(pc.bold("\n4. Testing Skenario List Filter: 'lihat siswa nunggak kelas 8B'"));
-  const rList = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("lihat siswa nunggak kelas 8B")}&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  const topOpt = rList.options[0];
-  console.log(`   Rank #1: ${pc.yellow(topOpt.target_type)} | Title: ${pc.bold(topOpt.title)}`);
-  console.log(`   Destination: ${pc.blue(topOpt.destination)}`);
-  console.log(topOpt.target_type === "LIST" ? pc.green("   ✔ Target Type LIST menduduki peringkat #1.") : pc.yellow("   ⚠️ Target type bukan LIST"));
-
-  // 5. Test Skenario Invoice Langsung: "INV-001"
-  console.log(pc.bold("\n5. Testing Skenario Invoice ID: 'INV-001'"));
-  const rInv = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("INV-001")}&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  const invOpt = rInv.options[0];
-  console.log(`   Rank #1: ${pc.yellow(invOpt.target_type)} | Title: ${pc.bold(invOpt.title)}`);
-  console.log(`   Destination: ${pc.blue(invOpt.destination)}`);
-  console.log(invOpt.destination.includes("/spp/invoice/") ? pc.green("   ✔ Berhasil resolusi ke halaman detail invoice.") : pc.red("   ✘ Gagal resolusi"));
-
-  // 6. Test Pengaruh Threshold: 0.8 vs 0.1
-  console.log(pc.bold("\n6. Testing Pengaruh Parameter Threshold:"));
-  const rTight = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.85&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  const rLoose = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas 8B")}&threshold=0.10&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  console.log(`   Threshold 85%: ${pc.cyan(rTight.total_options)} opsi`);
-  console.log(`   Threshold 10%: ${pc.cyan(rLoose.total_options)} opsi`);
-  console.log(rLoose.total_options >= rTight.total_options ? pc.green("   ✔ Threshold bekerja memfilter opsi secara dinamis.") : pc.red("   ✘ Gagal threshold"));
-
-  // 7. Test Pertanyaan Alami: "Aku ingin tahu nama anak siti ada di kelas mana"
-  console.log(pc.bold("\n7. Testing Pertanyaan Alami: 'Aku ingin tahu nama anak siti ada di kelas mana'"));
-  const rSiti = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("Aku ingin tahu nama anak siti ada di kelas mana")}&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" },
-    })
-  ).json();
-  console.log(`   Total Options: ${pc.cyan(rSiti.total_options)}`);
-  rSiti.options.forEach((opt: any) => {
-    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
-  });
-  const hasKelasSiti = rSiti.options[0]?.destination === "/kelas/K-08B";
-  console.log(hasKelasSiti ? pc.green("   ✔ Berhasil: Rank #1 membuka Ruang Kelas 8B tempat Siti belajar (/kelas/K-08B).") : pc.red("   ✘ Gagal kelas siti"));
-
-  // 8. Test Pertanyaan Agregasi: "kelas mana saja yang telat bayar"
-  console.log(pc.bold("\n8. Testing Pertanyaan Agregasi: 'kelas mana saja yang telat bayar'"));
-  const rTelat = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("kelas mana saja yang telat bayar")}&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" },
-    })
-  ).json();
-  console.log(`   Total Options: ${pc.cyan(rTelat.total_options)}`);
-  rTelat.options.forEach((opt: any) => {
-    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
-  });
-  const hasRekap = rTelat.options.some((o: any) => o.destination.includes("status=nunggak"));
-  console.log(hasRekap ? pc.green("   ✔ Berhasil: Memunculkan rekap tunggakan per kelas (8B dan 9A).") : pc.red("   ✘ Gagal agregasi"));
-
-  // 9. Test Query Waktu Relatif: "siapa siswa yang belum bayar bulan ini"
-  console.log(pc.bold("\n9. Testing Query Waktu Relatif: 'siapa siswa yang belum bayar bulan ini'"));
-  const rBulanIni = await (
-    await fetch(`${APP_URL}/api/search?q=${encodeURIComponent("siapa siswa yang belum bayar bulan ini")}&engine=jev`, {
-      headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" },
-    })
-  ).json();
-  console.log(`   Total Options: ${pc.cyan(rBulanIni.total_options)}`);
-  rBulanIni.options.forEach((opt: any) => {
-    console.log(`     [#${opt.rank}] ${pc.yellow(opt.target_type)} | ${pc.bold(opt.title)} ➔ ${pc.blue(opt.destination)}`);
-  });
-  const hasPeriode = rBulanIni.options[0]?.destination.includes("periode=bulan_ini");
-  console.log(hasPeriode ? pc.green("   ✔ Berhasil: Filter waktu relatif 'bulan ini' dikirim ke route SPP (periode=bulan_ini).") : pc.red("   ✘ Gagal periode bulan ini"));
-
-  // 10. Test Route Manifest: active_context & allowed_params
-  console.log(pc.bold("\n10. Testing Route Manifest: 'active_context' & 'allowed_params'"));
-  const rManifest = await (
-    await fetch(`${APP_URL}/api/routes`, { headers: { "X-Client-Id": "1", "X-User-Role": "KEUANGAN" } })
-  ).json();
-  console.log(`   Active Context: ${pc.cyan(JSON.stringify(rManifest.active_context))}`);
-  const sppRoute = rManifest.routes.find((r: any) => r.id === "spp");
-  console.log(`   Route SPP allowed_params: ${pc.cyan(JSON.stringify(sppRoute?.allowed_params))}`);
-  const ctxOk = rManifest.active_context?.tahun_ajaran && rManifest.active_context?.semester;
-  const paramsOk = sppRoute?.allowed_params?.includes("periode");
-  console.log(ctxOk && paramsOk ? pc.green("   ✔ Berhasil: App mengirim konteks kalender akademik aktif + kontrak allowed_params.") : pc.red("   ✘ Gagal manifest"));
-
-  console.log(pc.bold(pc.green("\n🎉 SEMUA FITUR STANDARDIZED ARRAY, DETAIL vs LIST & THRESHOLD TERVERIFIKASI 100%!\n")));
 }
 
-runE2E().catch(console.error);
+async function search(q: string, role: string, clientId = "1", engine = "auto") {
+  const res = await fetch(
+    `${SEARCH_URL}/resolve?q=${encodeURIComponent(q)}&engine=${engine}`,
+    { headers: { "X-Client-Id": clientId, "X-User-Role": role } }
+  );
+  if (!res.ok) throw new Error(`resolve HTTP ${res.status}: ${await res.text()}`);
+  return await res.json();
+}
+
+async function runE2E() {
+  console.log(pc.bold(pc.cyan("\n🚀 E2E SEQUENTIAL LAZY PIPELINE (Classify -> allowed_params -> Lazy Master -> Options)\n")));
+
+  // 1. Health check
+  console.log(pc.bold("1. Health check kedua service..."));
+  const health = await (await fetch(`${SEARCH_URL}/health`)).json();
+  console.log(pc.green(`   ✔ service-search: cache=${health.cache.engine}`));
+  const appHealth = await fetch(`${APP_URL}/api/routes`, { headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" } });
+  console.log(pc.green(`   ✔ app-education: HTTP ${appHealth.status}`));
+
+  // 2. Route manifest dari tabel search_routes (ParamSpec penuh)
+  console.log(pc.bold("\n2. Route Manifest (tabel search_routes + ACL)"));
+  const routes = await appHealth.json();
+  const sppRoute: any = routes.routes.find((r: any) => r.id === "spp");
+  console.log(pc.dim(`   Active Context: ${JSON.stringify(routes.active_context)}`));
+  console.log(pc.dim(`   spp allowed_params: ${JSON.stringify(sppRoute.allowed_params.map((p: any) => p.key))}`));
+  check(
+    "ParamSpec ber-endpoint tersedia dari DB",
+    sppRoute.allowed_params.some((p: any) => p.endpoint && p.mode === "list") &&
+      sppRoute.allowed_params.some((p: any) => p.mode === "enum" && p.values)
+  );
+
+  // 3. Kasus multi-entity: "Siti ini ada di kelas berapa?"
+  console.log(pc.bold("\n3. Multi-Entity Disambiguation: 'Siti ini ada di kelas berapa?'"));
+  const rSiti = await search("Siti ini ada di kelas berapa?", "SUPERADMIN");
+  console.log(`   route=${rSiti.target_route} | resolved=${JSON.stringify(Object.keys(rSiti.resolved_params || {}))}`);
+  rSiti.options.forEach((o: any) =>
+    console.log(`     [#${o.rank}] ${pc.yellow(o.target_type)} ${pc.bold(o.title)} ➔ ${pc.blue(o.destination)}`)
+  );
+  const siswaOpts = rSiti.options.filter((o: any) => o.data?.entity_role === "siswa");
+  const waliOpt = rSiti.options.find((o: any) => o.data?.entity_role === "wali_kelas");
+  check("2 siswa 'Siti' (Siti Rahma 8B & Siti Aisyah 7A) muncul sebagai opsi terpisah", siswaOpts.length >= 2 && !!siswaOpts.find((o: any) => o.data.siswa.nama === "Siti Aisyah"));
+  check("Opsi wali kelas 'Siti Aminah, S.Pd' juga muncul", !!waliOpt && waliOpt.data.wali_kelas.nama.includes("Siti Aminah"));
+  check("Payload data membawa objek siswa + kelas lengkap", !!siswaOpts[0]?.data?.siswa?.id && !!siswaOpts[0]?.data?.kelas?.id);
+
+  // 4. Filter SPP + tahun ajaran aktif
+  console.log(pc.bold("\n4. Negasi & Kalender: 'Siapa yang belum bayar spp tahun ajaran ini?'"));
+  const rSpp = await search("Siapa yang belum bayar spp tahun ajaran ini?", "KEUANGAN");
+  console.log(`   route=${rSpp.target_route}`);
+  rSpp.options.slice(0, 2).forEach((o: any) => console.log(`     [#${o.rank}] ${pc.bold(o.title)} ➔ ${pc.blue(o.destination)}`));
+  const filters = rSpp.options[0]?.data?.filters || {};
+  check("status=nunggak (negasi-aware, bukan salah ke 'linas')", filters.status === "nunggak");
+  check("academic_year_id FK tahun ajaran AKTIF dari DB (AY-2026)", filters.academic_year_id === routes.active_context.academic_year_id);
+
+  // 5. Negasi kebalikan: 'riwayat tagihan yang sudah lunas'
+  console.log(pc.bold("\n5. Negasi kebalikan: 'riwayat tagihan yang sudah lunas'"));
+  const rLunas = await search("riwayat tagihan yang sudah lunas", "SUPERADMIN");
+  check("status=lunas (bukan nunggak meski ada kata 'tagihan')", rLunas.options[0]?.data?.filters?.status === "lunas", `-> ${rLunas.options[0]?.destination}`);
+
+  // 5B. Natural-language waktu & status (enum + semantic fallback):
+  console.log(pc.bold("\n5B. Natural Language: waktu relatif & status colloquial"));
+  const nlCases = [
+    { q: "Siapa yang belum bayar spp minggu ini?", filter: { status: "nunggak", periode: "minggu_ini" } },
+    { q: "Siapa yang belum bayar spp tahun lalu?", filter: { status: "nunggak", periode: "tahun_lalu" } },
+    { q: "santri yang udah nyetor syahriah", filter: { status: "lunas" } },
+    { q: "santri yang belum nyetor syahriah", filter: { status: "nunggak" } },
+    { q: "kembalian siswa yg sudah kasih duit", filter: { status: "lunas" } },
+  ];
+  for (const tc of nlCases) {
+    const r = await search(tc.q, "SUPERADMIN");
+    const f = r.options[0]?.data?.filters || {};
+    const ok = Object.entries(tc.filter).every(([k, v]) => f[k] === v);
+    check(`"${tc.q}" -> ${JSON.stringify(tc.filter)}`, ok, `got ${JSON.stringify(f)}`);
+  }
+
+  // 6. Master semantic: 'nilai matematika tahun ajaran ini'
+  console.log(pc.bold("\n6. Master lazy cache: 'nilai matematika tahun ajaran ini'"));
+  const rNilai = await search("nilai matematika tahun ajaran ini", "SUPERADMIN");
+  const nilaiFilters = rNilai.options[0]?.data?.filters || {};
+  console.log(`   route=${rNilai.target_route} ➔ ${pc.blue(rNilai.options[0]?.destination)}`);
+  check("subject_id ter-resolve ke master subjects", !!nilaiFilters.subject_id);
+  check("academic_year_id AKTIF ikut ter-set", !!nilaiFilters.academic_year_id);
+
+  // 7. ACL: GURU tidak boleh dapat SPP
+  console.log(pc.bold("\n7. ACL Isolasi: role GURU meminta SPP"));
+  const rGuru = await search("spp nunggak", "GURU");
+  const guruDests = rGuru.options.map((o: any) => o.destination);
+  console.log(pc.dim(`   Options GURU: ${JSON.stringify(guruDests)}`));
+  check("Tidak ada opsi /spp untuk role GURU", !guruDests.some((d: any) => d.startsWith("/spp")));
+
+  // 8. Multi-tenant: client_id=2 terisolasi
+  console.log(pc.bold("\n8. Multi-Tenant: client_id=2 (santri)"));
+  const rT2 = await search("santri nunggak", "ADMIN", "2");
+  console.log(pc.dim(`   Options tenant 2: ${rT2.options.map((o: any) => o.destination).join(", ")}`));
+  const t2Manifest = await (await fetch(`${APP_URL}/api/routes`, { headers: { "X-Client-Id": "2", "X-User-Role": "ADMIN" } })).json();
+  check(
+    "Tenant 2 isolated: route spp & manifest tanpa bocor tenant lain",
+    rT2.target_route === "spp" && t2Manifest.routes.every((r: any) => r.client_id === "2")
+  );
+
+  // 9. Threshold dinamis
+  console.log(pc.bold("\n9. Threshold dinamis (tight 0.9 vs loose 0.1)"));
+  const rTightQ = await fetch(`${SEARCH_URL}/resolve?q=${encodeURIComponent("Siti ini ada di kelas berapa?")}&threshold=0.9`, { headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" } }).then((r) => r.json());
+  const rLooseQ = await fetch(`${SEARCH_URL}/resolve?q=${encodeURIComponent("Siti ini ada di kelas berapa?")}&threshold=0.1`, { headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" } }).then((r) => r.json());
+  console.log(pc.dim(`   Threshold 90%: ${rTightQ.total_options} opsi | Threshold 10%: ${rLooseQ.total_options} opsi`));
+  check("Threshold bekerja memfilter opsi dinamis", rLooseQ.total_options >= rTightQ.total_options);
+
+  // 10. Local fallback (transformers.js in-process)
+  console.log(pc.bold("\n10. Local Fallback (transformers.js in-process, engine=local)"));
+  const rLocal = await search("Siti ini ada di kelas berapa?", "SUPERADMIN", "1", "local");
+  console.log(pc.dim(`   engine=${rLocal.engine} | route=${rLocal.target_route}`));
+  check("Fallback local tetap menurunkan opsi entity kelas Siti", rLocal.options.some((o: any) => o.destination === "/kelas/K-08B"));
+
+  // 11. Cache hit latensi
+  console.log(pc.bold("\n11. Redis Query Cache (2nd call < 20ms)"));
+  const t1 = performance.now();
+  await fetch(`${SEARCH_URL}/resolve?q=${encodeURIComponent("Siti ini ada di kelas berapa?")}`, { headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" } });
+  const dur = performance.now() - t1;
+  console.log(pc.dim(`   2nd call: ${dur.toFixed(2)}ms`));
+  check(dur < 20, "Cache hit < 20ms");
+
+  // Rangkuman
+  if (failures === 0) {
+    console.log(pc.bold(pc.green("\n🎉 SEMUA CHECK SEQUENTIAL LAZY PIPELINE LULUS!\n")));
+  } else {
+    console.log(pc.bold(pc.red(`\n⛔ ${failures} CHECK GAGAL — perbaiki pipeline sebelum deploy.\n`)));
+    process.exit(1);
+  }
+}
+
+// Simpan ringkasan hasil ke file untuk audit CI (opsional)
+process.on("exit", (code) => {
+  try {
+    fs.writeFileSync(
+      "e2e-result.json",
+      JSON.stringify({ status: code === 0 ? "pass" : "fail", failures, at: new Date().toISOString() }, null, 2)
+    );
+  } catch {}
+});
+
+runE2E().catch((e) => {
+  console.error(pc.red(`\n⛔ E2E Fatal: ${e.message}`));
+  process.exit(1);
+});

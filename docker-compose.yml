@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# SMART SEARCH PRODUCTION STACK
+# Dedicated 4 vCPU / 4 GB RAM Docker — HANYA service-search + redis.
+# app-education TIDAK di-container-kan di stack ini: berjalan di host/server
+# utama (default http://host.docker.internal:3000, diutak APP_EDUCATION_URL).
+# ---------------------------------------------------------------------------
+
+services:
+  service-search:
+    build:
+      context: ./service-search
+      dockerfile: Dockerfile
+    container_name: smart-search
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - SEARCH_PORT=4000
+      - APP_EDUCATION_URL=${APP_EDUCATION_URL:-http://host.docker.internal:3000}
+      - REDIS_URL=redis://redis:6379
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
+      - LOCAL_MODEL_ID=Xenova/multilingual-e5-small
+      - LOCAL_MODEL_DTYPE=q8
+      - HF_HOME=/app/.cache
+      - HF_ALLOW_REMOTE=false
+      - SMARTSEARCH_MASTER_TTL=1800
+      - SMARTSEARCH_WARMUP=1:SUPERADMIN
+    volumes:
+      - smartsearch_cache:/app/.cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:4000/health').then(r=>{if(!r.ok)process.exit(1)})" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Resource limits (bagian dari 4 vCPU / 4 GB RAiden total)
+    cpus: "3.50"
+    mem_limit: 3g
+    networks:
+      - smartsearch
+
+  redis:
+    image: redis:7-alpine
+    container_name: smart-search-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 768mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    cpus: "0.50"
+    mem_limit: 1g
+    networks:
+      - smartsearch
+
+networks:
+  smartsearch:
+    driver: bridge
+
+volumes:
+  redis_data:
+  smartsearch_cache:

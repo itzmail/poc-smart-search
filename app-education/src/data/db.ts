@@ -13,11 +13,16 @@ export function initDatabase() {
   db.run("PRAGMA journal_mode = WAL;");
 
   // 1. PINTRO JOB (Tabel Menu/Fitur)
+  // Metadata semantik (description, keywords, dll) ikut di DB — TIDAK ADA hardcode di kode service
   db.run(`
     CREATE TABLE IF NOT EXISTS job (
       id TEXT PRIMARY KEY,
       code TEXT NOT NULL,
       name TEXT NOT NULL,
+      description TEXT,
+      keywords TEXT,
+      supported_intents TEXT,
+      allowed_params TEXT,
       parent TEXT,
       ordering INTEGER NOT NULL DEFAULT 1,
       display INTEGER NOT NULL DEFAULT 1,
@@ -28,6 +33,70 @@ export function initDatabase() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       deleted_at TEXT
+    );
+  `);
+
+  // 1b. MASTER ACADEMIC YEAR (Tahun Ajaran Aktif per Tenant)
+  // Sumber kebenaran kalender akademik — aktif menurut DB, bukan new Date()
+  db.run(`
+    CREATE TABLE IF NOT EXISTS academic_year (
+      id TEXT PRIMARY KEY,            -- e.g. "AY-2026"
+      name TEXT NOT NULL,             -- e.g. "2026/2027"
+      semester TEXT NOT NULL,         -- "ganjil" | "genap"
+      start_date TEXT NOT NULL,       -- e.g. "2026-07-01"
+      end_date TEXT NOT NULL,         -- e.g. "2027-06-30"
+      is_active INTEGER NOT NULL DEFAULT 0,
+      client_id TEXT NOT NULL
+    );
+  `);
+
+  // 1c. SEARCH ROUTES — 1 Tabel konfigurasi Smart Search Production (dipisah dari tabel job)
+  // allowed_params = array of ParamSpec: { key, endpoint?, mode: "list"|"search"|"enum",
+  //   query_param?, match_field?, resolves_to?, hint_regex?, values? }
+  // Semua konfigurasi lazy-fetch & matching disimpan di DB (zero-hardcode di service-search).
+  db.run(`
+    CREATE TABLE IF NOT EXISTS search_routes (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      title TEXT NOT NULL,
+      url_path TEXT NOT NULL,
+      description TEXT,
+      keywords TEXT,
+      supported_intents TEXT,
+      allowed_params TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      client_id TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT
+    );
+  `);
+
+  // 1d. MASTER DEPARTMENT (Jurusan) — contoh master list kecil untuk lazy cache
+  db.run(`
+    CREATE TABLE IF NOT EXISTS master_department (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      client_id TEXT NOT NULL
+    );
+  `);
+
+  // 1e. MASTER CLASS LEVEL (Tingkat) — contoh master list kecil untuk lazy cache
+  db.run(`
+    CREATE TABLE IF NOT EXISTS master_class_level (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      client_id TEXT NOT NULL
+    );
+  `);
+
+  // 1f. MASTER SUBJECT (Mata Pelajaran) — contoh master list kecil untuk lazy cache
+  db.run(`
+    CREATE TABLE IF NOT EXISTS master_subject (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      client_id TEXT NOT NULL
     );
   `);
 
@@ -81,6 +150,7 @@ export function initDatabase() {
       siswa_id TEXT NOT NULL,
       nama_siswa TEXT NOT NULL,
       kelas_id TEXT NOT NULL,
+      academic_year_id TEXT,
       bulan TEXT NOT NULL,
       nominal INTEGER NOT NULL,
       status TEXT NOT NULL,
@@ -108,6 +178,7 @@ export function initDatabase() {
       siswa_id TEXT NOT NULL,
       nama_siswa TEXT NOT NULL,
       kelas TEXT NOT NULL,
+      academic_year_id TEXT,
       mapel TEXT NOT NULL,
       semester TEXT NOT NULL,
       nilai_akhir INTEGER NOT NULL,
@@ -122,6 +193,7 @@ export function initDatabase() {
       siswa_id TEXT NOT NULL,
       nama_siswa TEXT NOT NULL,
       kelas TEXT NOT NULL,
+      academic_year_id TEXT,
       bulan TEXT NOT NULL,
       nominal INTEGER NOT NULL,
       status TEXT NOT NULL,
@@ -139,23 +211,26 @@ export function initDatabase() {
     const monthName = now.toLocaleString("id-ID", { month: "long" });
     const bulanLabel = `${monthName} ${now.getFullYear()}`;
     const jatuhTempo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-10`;
+    // Semester aktif menurut kalender saat seeding: TA baru dimulai Juli (bulan 7)
+    const isGanjil = now.getMonth() + 1 >= 7;
     const insertJob = db.prepare(`
-      INSERT INTO job (id, code, name, parent, ordering, display, icon, client_id) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO job (id, code, name, description, keywords, supported_intents, allowed_params, parent, ordering, display, icon, client_id) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     // Tenant 1 (Client ID: "1") - Gunakan code lowercase sesuai standar Pintro
-    insertJob.run("J01", "dashboard", "Dashboard Utama", null, 1, 1, "layout-dashboard", "1");
-    insertJob.run("J02", "siswa", "Master Data Siswa", null, 2, 1, "users", "1");
-    insertJob.run("J03", "nilai", "Penilaian Akademik Siswa", null, 3, 1, "award", "1");
-    insertJob.run("J04", "spp", "Pembayaran & Tagihan SPP", null, 4, 1, "credit-card", "1");
-    insertJob.run("J05", "rapot", "Cetak & Distribusi Rapot", null, 5, 1, "file-text", "1");
-    insertJob.run("J06", "kelas", "Master Ruang Kelas", null, 6, 1, "school", "1");
+    // description/keywords/supported_intents/allowed_params diambil dari DB (JSON TEXT)
+    insertJob.run("J01", "dashboard", "Dashboard Utama", "Statistik umum sekolah: total siswa, siswa aktif, dan ringkasan pembayaran", JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]), JSON.stringify(["LIST_MENU"]), JSON.stringify([]), null, 1, 1, "layout-dashboard", "1");
+    insertJob.run("J02", "siswa", "Master Data Siswa", "Daftar dan profil data siswa, murid, dan santri dengan filter kelas dan status", JSON.stringify(["siswa", "murid", "santri", "pelajar", "data siswa", "profil"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "academic_year_id", "q"]), null, 2, 1, "users", "1");
+    insertJob.run("J03", "nilai", "Penilaian Akademik Siswa", "Buku nilai siswa, rekap nilai harian, dan nilai per mata pelajaran", JSON.stringify(["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "semester", "mapel", "academic_year_id"]), null, 3, 1, "award", "1");
+    insertJob.run("J04", "spp", "Pembayaran & Tagihan SPP", "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah", "invoice"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "periode", "academic_year_id", "invoice_id"]), null, 4, 1, "credit-card", "1");
+    insertJob.run("J05", "rapot", "Cetak & Distribusi Rapot", "Aksi cetak dan unduh dokumen rapor siswa format PDF atau Excel", JSON.stringify(["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"]), JSON.stringify(["LIST_MENU", "REPORT_ACTION"]), JSON.stringify(["kelas", "semester", "format", "nama"]), null, 5, 1, "file-text", "1");
+    insertJob.run("J06", "kelas", "Master Ruang Kelas", "Data ruang kelas, rombel, dan wali kelas per tingkat", JSON.stringify(["kelas", "ruang kelas", "rombel", "wali kelas", "tingkat"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["id", "tingkat"]), null, 6, 1, "school", "1");
 
     // Tenant 2 (Client ID: "2") - Menu Santri
-    insertJob.run("J01_T2", "dashboard", "Dashboard Sekolah", null, 1, 1, "layout-dashboard", "2");
-    insertJob.run("J02_T2", "siswa", "Data Santri", null, 2, 1, "users", "2");
-    insertJob.run("J04_T2", "spp", "Kas & Syahriah (SPP)", null, 3, 1, "credit-card", "2");
+    insertJob.run("J01_T2", "dashboard", "Dashboard Sekolah", "Statistik umum sekolah santri", JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]), JSON.stringify(["LIST_MENU"]), JSON.stringify([]), null, 1, 1, "layout-dashboard", "2");
+    insertJob.run("J02_T2", "siswa", "Data Santri", "Daftar dan profil data santri dengan filter kelas dan status", JSON.stringify(["siswa", "murid", "santri", "pelajar", "data santri"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "q"]), null, 2, 1, "users", "2");
+    insertJob.run("J04_T2", "spp", "Kas & Syahriah (SPP)", "Kelola kas dan iuran syahriah santri, list santri nunggak", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "syahriah", "kas"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "periode", "academic_year_id"]), null, 3, 1, "credit-card", "2");
 
     // Seed Groups (Role)
     const insertGroup = db.prepare(`
@@ -214,17 +289,30 @@ export function initDatabase() {
     // Tenant 2
     insertKelas.run("K-10A_T2", "10a", "Kelas 10A Ula", "10", "Ustadz Abdullah", "2");
 
+    // Seed Academic Year (1 tahun ajaran AKTIF per tenant, dari kalender saat seeding)
+    const insertAY = db.prepare(`
+      INSERT INTO academic_year (id, name, semester, start_date, end_date, is_active, client_id)
+      VALUES (?, ?, ?, ?, ?, 1, ?)
+    `);
+    if (isGanjil) {
+      insertAY.run("AY-2026", "2026/2027", "ganjil", "2026-07-01", "2027-06-30", "1");
+      insertAY.run("AY-2025", "2025/2026", "genap", "2025-07-01", "2026-06-30", "1");
+    } else {
+      insertAY.run("AY-2025", "2025/2026", "genap", "2025-07-01", "2026-06-30", "1");
+    }
+    const activeAYId = "AY-" + (isGanjil ? "2026" : "2025");
+
     // Seed Invoices (Tenant 1)
     const insertInvoice = db.prepare(`
-      INSERT INTO invoice (id, invoice_no, siswa_id, nama_siswa, kelas_id, bulan, nominal, status, client_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO invoice (id, invoice_no, siswa_id, nama_siswa, kelas_id, academic_year_id, bulan, nominal, status, client_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insertInvoice.run("INV-2024-10-001", "INV/2024/10/001", "S001", "Budi Santoso", "K-08B", bulanLabel, 500000, "nunggak", "1");
-    insertInvoice.run("INV-2024-10-002", "INV/2024/10/002", "S002", "Siti Rahma", "K-08B", bulanLabel, 500000, "lunas", "1");
-    insertInvoice.run("INV-2024-10-003", "INV/2024/10/003", "S006", "Farhan Nugraha", "K-08B", bulanLabel, 500000, "nunggak", "1");
-    insertInvoice.run("INV-2024-10-004", "INV/2024/10/004", "S005", "Rian Hidayat", "K-09A", bulanLabel, 550000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-001", "INV/2024/10/001", "S001", "Budi Santoso", "K-08B", activeAYId, bulanLabel, 500000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-002", "INV/2024/10/002", "S002", "Siti Rahma", "K-08B", activeAYId, bulanLabel, 500000, "lunas", "1");
+    insertInvoice.run("INV-2024-10-003", "INV/2024/10/003", "S006", "Farhan Nugraha", "K-08B", activeAYId, bulanLabel, 500000, "nunggak", "1");
+    insertInvoice.run("INV-2024-10-004", "INV/2024/10/004", "S005", "Rian Hidayat", "K-09A", activeAYId, bulanLabel, 550000, "nunggak", "1");
     // Tenant 2
-    insertInvoice.run("INV-2024-10-005", "INV/2024/10/005", "S008", "Santri Zaid", "K-10A_T2", "Oktober 2024", 750000, "nunggak", "2");
+    insertInvoice.run("INV-2024-10-005", "INV/2024/10/005", "S008", "Santri Zaid", "K-10A_T2", "AY-2026", bulanLabel, 750000, "nunggak", "2");
 
     // Seed Siswa untuk Tenant 1
     const insertSiswa = db.prepare(`
@@ -238,6 +326,8 @@ export function initDatabase() {
       ["S005", "0081234565", "Rian Hidayat", "9A", "K-09A", "aktif", "L", "1"],
       ["S006", "0081234566", "Farhan Nugraha", "8B", "K-08B", "aktif", "L", "1"],
       ["S007", "0081234567", "Putri Anggraini", "8B", "K-08B", "pindah", "P", "1"],
+      // Siswa "Siti" ke-2 — kasus multi-entity disambiguation (Siti Rahma 8B vs Siti Aisyah 7A)
+      ["S009", "0081234569", "Siti Aisyah", "7A", "K-07A", "aktif", "P", "1"],
       // Tenant 2
       ["S008", "0099999901", "Santri Zaid", "10A", "K-10A_T2", "aktif", "L", "2"],
     ];
@@ -246,37 +336,276 @@ export function initDatabase() {
     }
 
     const insertNilai = db.prepare(`
-      INSERT INTO nilai (id, siswa_id, nama_siswa, kelas, mapel, semester, nilai_akhir, keterangan, client_id) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO nilai (id, siswa_id, nama_siswa, kelas, academic_year_id, mapel, semester, nilai_akhir, keterangan, client_id) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const nilaiList = [
-      ["N001", "S001", "Budi Santoso", "8B", "Matematika", "ganjil", 88, "Tuntas", "1"],
-      ["N002", "S001", "Budi Santoso", "8B", "IPA", "ganjil", 90, "Tuntas", "1"],
-      ["N003", "S002", "Siti Rahma", "8B", "Matematika", "ganjil", 92, "Tuntas", "1"],
-      ["N004", "S005", "Rian Hidayat", "9A", "Matematika", "ganjil", 74, "Belum Tuntas", "1"],
-      ["N005", "S001", "Budi Santoso", "8B", "IPA", "genap", 85, "Tuntas", "1"],
+      ["N001", "S001", "Budi Santoso", "8B", activeAYId, "Matematika", "ganjil", 88, "Tuntas", "1"],
+      ["N002", "S001", "Budi Santoso", "8B", activeAYId, "IPA", "ganjil", 90, "Tuntas", "1"],
+      ["N003", "S002", "Siti Rahma", "8B", activeAYId, "Matematika", "ganjil", 92, "Tuntas", "1"],
+      ["N004", "S005", "Rian Hidayat", "9A", activeAYId, "Matematika", "ganjil", 74, "Belum Tuntas", "1"],
+      ["N005", "S001", "Budi Santoso", "8B", activeAYId, "IPA", "genap", 85, "Tuntas", "1"],
       // Tenant 2
-      ["N006", "S008", "Santri Zaid", "10A", "Nahwu", "ganjil", 95, "Mumtaz", "2"],
+      ["N006", "S008", "Santri Zaid", "10A", "AY-2026", "Nahwu", "ganjil", 95, "Mumtaz", "2"],
     ];
     for (const n of nilaiList) {
       insertNilai.run(...n);
     }
 
     const insertSPP = db.prepare(`
-      INSERT INTO spp (id, siswa_id, nama_siswa, kelas, bulan, nominal, status, jatuh_tempo, client_id) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO spp (id, siswa_id, nama_siswa, kelas, academic_year_id, bulan, nominal, status, jatuh_tempo, client_id) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const sppList = [
-      ["SPP001", "S001", "Budi Santoso", "8B", bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
-      ["SPP002", "S002", "Siti Rahma", "8B", bulanLabel, 500000, "lunas", jatuhTempo, "1"],
-      ["SPP003", "S006", "Farhan Nugraha", "8B", bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
-      ["SPP004", "S005", "Rian Hidayat", "9A", bulanLabel, 550000, "nunggak", jatuhTempo, "1"],
-      ["SPP005", "S003", "Ahmad Dahlan", "7A", bulanLabel, 450000, "lunas", jatuhTempo, "1"],
+      ["SPP001", "S001", "Budi Santoso", "8B", activeAYId, bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
+      ["SPP002", "S002", "Siti Rahma", "8B", activeAYId, bulanLabel, 500000, "lunas", jatuhTempo, "1"],
+      ["SPP003", "S006", "Farhan Nugraha", "8B", activeAYId, bulanLabel, 500000, "nunggak", jatuhTempo, "1"],
+      ["SPP004", "S005", "Rian Hidayat", "9A", activeAYId, bulanLabel, 550000, "nunggak", jatuhTempo, "1"],
+      ["SPP005", "S003", "Ahmad Dahlan", "7A", activeAYId, bulanLabel, 450000, "lunas", jatuhTempo, "1"],
       // Tenant 2
-      ["SPP006", "S008", "Santri Zaid", "10A", bulanLabel, 750000, "nunggak", jatuhTempo, "2"],
+      ["SPP006", "S008", "Santri Zaid", "10A", "AY-2026", bulanLabel, 750000, "nunggak", jatuhTempo, "2"],
     ];
     for (const sp of sppList) {
       insertSPP.run(...sp);
     }
   }
+
+  // Seed Master Department / Class Level / Subject (master list kecil utk lazy cache)
+  const deptCount = db.query("SELECT COUNT(id) as count FROM master_department").get() as { count: number };
+  if (deptCount.count === 0) {
+    const insertDept = db.prepare("INSERT INTO master_department (id, name, client_id) VALUES (?, ?, ?)");
+    insertDept.run("DEPT-IPA", "IPA", "1");
+    insertDept.run("DEPT-IPS", "IPS", "1");
+    insertDept.run("DEPT-UMUM", "Umum", "1");
+
+    const insertLvl = db.prepare("INSERT INTO master_class_level (id, name, client_id) VALUES (?, ?, ?)");
+    insertLvl.run("LVL-7", "7", "1");
+    insertLvl.run("LVL-8", "8", "1");
+    insertLvl.run("LVL-9", "9", "1");
+
+    const insertSub = db.prepare("INSERT INTO master_subject (id, name, client_id) VALUES (?, ?, ?)");
+    insertSub.run("SUB-01", "Matematika", "1");
+    insertSub.run("SUB-02", "Ilmu Pengetahuan Alam (Sains)", "1");
+    insertSub.run("SUB-03", "Bahasa Indonesia", "1");
+    insertSub.run("SUB-04", "Bahasa Inggris", "1");
+  }
+
+  // Ensure ACL Tenant 2 (ADMIN -> semua job T2; GURU T2 -> tanpa SPP) — idempotent
+  const aclT2Count = db.query("SELECT COUNT(id) as count FROM acl WHERE client_id = '2'").get() as { count: number };
+  if (aclT2Count.count === 0) {
+    const insAclT2 = db.prepare("INSERT OR IGNORE INTO acl (id, groups_id, job_id, add_priv, edit_priv, remove_priv, delete_priv, client_id) VALUES (?, ?, ?, 1,1,1,1, '2')");
+    insAclT2.run("ACL20", "G01_T2", "J01_T2");
+    insAclT2.run("ACL21", "G01_T2", "J02_T2");
+    insAclT2.run("ACL22", "G01_T2", "J04_T2");
+    insAclT2.run("ACL23", "G02_T2", "J01_T2");
+    insAclT2.run("ACL24", "G02_T2", "J02_T2");
+  }
+
+  // Ensure demo multi-"Siti" tersedia (idempotent — untuk kasus multi-entity disambiguation)
+  const sitiCount = db.query("SELECT COUNT(id) as count FROM siswa WHERE LOWER(nama) LIKE 'siti%'").get() as { count: number };
+  if (sitiCount.count < 2) {
+    db.query("INSERT OR IGNORE INTO siswa (id, nisn, nama, kelas, kelas_id, status, gender, client_id) VALUES ('S009', '0081234569', 'Siti Aisyah', '7A', 'K-07A', 'aktif', 'P', '1')").run();
+  }
+
+  // Shared param configs (mengurangi duplikasi JSON antar route)
+  const academicYearParam = {
+    key: "academic_year_id",
+    endpoint: "/api/master/academic-years",
+    mode: "list",
+    hint_regex: "(tahun|th(a)?n\\??)\\s*(ajaran|pelajaran|ajar)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}",
+  };
+  const kelasParam = {
+    key: "kelas_id",
+    endpoint: "/api/master/kelas",
+    mode: "list",
+    hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b[789]\\s?[a-d]|\\b1[012]\\s?[a-d]",
+  };
+  const statusSppParam = {
+    key: "status",
+    hint_regex: "\\b(status|lunas|nunggak|bayar|tunggakan|hutang|setor|nyetor|duit|uang|manarin|piring)\\b",
+    mode: "enum",
+    values: {
+      nunggak: "\\b(nunggak|belum\\s*(bayar|lunas|setor|nyetor)|tertunggak|terlambat\\s*bayar|masih\\s*hutang|manarin)\\b|\\bpiring\\b",
+      lunas: "\\b(lunas|sudah\\s*(bayar|lunas|setor|nyetor)|pembayaran\\s*selesai|bebas\\s*tunggakan)\\b",
+    },
+  };
+  const periodeParam = {
+    key: "periode",
+    // Gate semantik: enum periode hanya aktif bila kalimat memuat kata waktu
+    hint_regex: "\\b(hari|minggu|bulan|tahun|semester|kemarin|lalu|sekarang|berjalan|this\\s*(week|month|year))\\b",
+    mode: "enum",
+    values: {
+      hari_ini: "\\b(hari\\s*ini)\\b",
+      minggu_ini: "\\b(minggu\\s*(ini|berjalan|sekarang)|7\\s*hari\\s*(terakhir|ini))\\b",
+      bulan_ini: "\\b(bulan\\s*(ini|berjalan|sekarang)|this\\s*month)\\b",
+      bulan_lalu: "\\b(bulan\\s*(lalu|kemarin|sebelumnya)|bulan\\s*yang\\s*lalu)\\b",
+      tahun_ini: "\\b(tahun\\s*(ini|sekarang))\\b",
+      tahun_lalu: "\\b(tahun\\s*(lalu|kemarin|sebelumnya)|tahun\\s*yang\\s*lalu)\\b",
+    },
+  };
+  const semesterParam = {
+    key: "semester",
+    hint_regex: "\\b(semester|sem|ganjil|genap|gasal)\\b",
+    mode: "enum",
+    values: {
+      ganjil: "\\b(ganjil|semester\\s*1|sem\\s*1)\\b",
+      genap: "\\b(genap|semester\\s*2|sem\\s*2)\\b",
+    },
+  };
+
+  // Seed Search Routes (konfigurasi Smart Search production) jika kosong
+  const routeCount = db.query("SELECT COUNT(id) as count FROM search_routes").get() as { count: number };
+
+  // Migration idempotent: kisahkan enum anchors baru (minggu/bulan lalu/tahun lalu/colloquial)
+  // ke existing rows tanpa meng-me-reset seluruh route config. Sebagai rule untuk DB lama.
+  const DEFAULT_ENUM_VALUES: Record<string, Record<string, string>> = {
+    status: statusSppParam.values,
+    periode: periodeParam.values,
+    semester: {
+      ganjil: "\\b(ganjil|semester\\s*1|sem\\s*1)\\b",
+      genap: "\\b(genap|semester\\s*2|sem\\s*2)\\b",
+    },
+  };
+  const enumRows = db.query("SELECT id, allowed_params FROM search_routes").all() as any[];
+  for (const row of enumRows) {
+    const specs: any[] = JSON.parse(row.allowed_params || "[]");
+    let changed = false;
+    for (const spec of specs) {
+      const defaults = DEFAULT_ENUM_VALUES[spec.key];
+      if ((spec.mode ?? "") === "enum" && defaults) {
+        if (spec.key === "periode" && !spec.hint_regex) {
+          spec.hint_regex = periodeParam.hint_regex;
+          changed = true;
+        }
+        if (spec.key === "status" && !spec.hint_regex) {
+          spec.hint_regex = statusSppParam.hint_regex;
+          changed = true;
+        }
+        if (spec.key === "semester" && !spec.hint_regex) {
+          spec.hint_regex = semesterParam.hint_regex;
+          changed = true;
+        }
+        for (const [vk, rx] of Object.entries(defaults)) {
+          // Upgrade: key baru ditambahkan; key existing di-upgrade ke anchor default
+          // (DB code-managed: constants ini adalah source of truth enum anchors)
+          if (spec.values[vk] !== rx) {
+            spec.values[vk] = rx as string;
+            changed = true;
+          }
+        }
+      }
+    }
+    if (changed) {
+      db.query("UPDATE search_routes SET allowed_params = ? WHERE id = ?").run(JSON.stringify(specs), row.id);
+    }
+  }
+
+  if (routeCount.count === 0) {
+    const insertRoute = db.prepare(`
+      INSERT INTO search_routes (id, job_id, code, title, url_path, description, keywords, supported_intents, allowed_params, is_active, client_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `);
+
+
+    // ---- Tenant 1 ----
+    insertRoute.run("SR-01", "J01", "dashboard", "Dashboard Utama", "/dashboard",
+      "Statistik umum sekolah: total siswa, siswa aktif, dan ringkasan pembayaran",
+      JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]),
+      JSON.stringify(["LIST_MENU"]), JSON.stringify([]), "1");
+
+    insertRoute.run("SR-02", "J02", "siswa", "Master Data Siswa", "/siswa",
+      "Daftar dan profil data siswa, murid, dan santri dengan filter kelas dan status",
+      JSON.stringify(["siswa", "murid", "santri", "pelajar", "data siswa", "profil"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
+        kelasParam,
+        { key: "status", mode: "enum", values: { aktif: "\\b(aktif|masih\\s*belajar)\\b", pindah: "\\b(pindah|pindahan)\\b", nunggak: "\\b(nunggak|belum\\s*(bayar|lunas))\\b", lunas: "\\b(lunas|sudah\\s*bayar)\\b" } },
+      ]), "1");
+
+    insertRoute.run("SR-03", "J03", "nilai", "Penilaian Akademik Siswa", "/nilai",
+      "Buku nilai siswa, rekap nilai harian, dan nilai per mata pelajaran",
+      JSON.stringify(["nilai", "akademik", "skor", "ulangan", "rapor nilai"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        { key: "subject_id", endpoint: "/api/master/subjects", mode: "list", hint_regex: "nila|mapel|pelajaran|matematika|mtk|ipa|sains|ips|bahasa" },
+        kelasParam,
+        semesterParam,
+        academicYearParam,
+      ]), "1");
+
+    insertRoute.run("SR-04", "J04", "spp", "Pembayaran & Tagihan SPP", "/spp",
+      "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran",
+      JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", hint_regex: "\\b(siapa|siswa|murid|santri|anak)\\b|\\b(budi|siti|ahmad|dewi|rian|farhan|putri)\\b" },
+        kelasParam,
+        statusSppParam,
+        periodeParam,
+        academicYearParam,
+      ]), "1");
+
+    insertRoute.run("SR-05", "J05", "rapot", "Cetak & Distribusi Rapot", "/rapot",
+      "Aksi cetak dan unduh dokumen rapor siswa format PDF atau Excel",
+      JSON.stringify(["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"]),
+      JSON.stringify(["LIST_MENU", "REPORT_ACTION"]), JSON.stringify([
+        kelasParam,
+        semesterParam,
+        { key: "format", mode: "enum", values: { pdf: "\\bpdf\\b", excel: "\\b(excel|xlsx|csv)\\b", print: "\\b(cetak|print)\\b" } },
+      ]), "1");
+
+    insertRoute.run("SR-06", "J06", "kelas", "Master Ruang Kelas", "/kelas",
+      "Data ruang kelas, rombel, wali kelas, dan pencarian kelas dari nama siswa (mis: siti ada di kelas berapa)",
+      JSON.stringify(["kelas", "ruang kelas", "rombel", "wali kelas", "tingkat"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        // Bridge param: cari nama siswa via /api/siswa, hasil siswa menyebut kelasnya (kelas_id)
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", resolves_to: "kelas_id" },
+        // List param: cek wali_kelas di master kelas via match_field
+        { key: "wali_kelas", endpoint: "/api/master/kelas", mode: "list", match_field: "wali_kelas", resolves_to: "kelas_id", hint_regex: "\\b(wali|guru|ibu|bapak|bu\\s|pak\\s)\\b|[a-z]{4,}" },
+        // List param: cocokkan nama/kode kelas langsung
+        kelasParam,
+      ]), "1");
+
+    // ---- Tenant 2 ----
+    insertRoute.run("SR-01_T2", "J01_T2", "dashboard", "Dashboard Sekolah", "/dashboard",
+      "Statistik umum sekolah santri",
+      JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]),
+      JSON.stringify(["LIST_MENU"]), JSON.stringify([]), "2");
+
+    insertRoute.run("SR-02_T2", "J02_T2", "siswa", "Data Santri", "/siswa",
+      "Daftar dan profil data santri dengan filter kelas dan status",
+      JSON.stringify(["siswa", "murid", "santri", "pelajar", "data santri"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
+        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list", hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b10\\s?[a-d]" },
+        { key: "status", mode: "enum", values: { aktif: "\\b(aktif|masih\\s*belajar)\\b", pindah: "\\b(pindah|pindahan)\\b" } },
+      ]), "2");
+
+    insertRoute.run("SR-04_T2", "J04_T2", "spp", "Kas & Syahriah (SPP)", "/spp",
+      "Kelola kas dan iuran syahriah santri, list santri nunggak",
+      JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "syahriah", "kas"]),
+      JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", hint_regex: "\\b(siapa|santri|murid|anak)\\b|\\bbu\\b|\\bpak\\b|\\bibu\\b|\\bbapak\\b|\\b(wali|guru)\\b|\\brola\\b" },
+        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list", hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b10\\s?[a-d]" },
+        statusSppParam,
+        periodeParam,
+        academicYearParam,
+      ]), "2");
+  }
+}
+
+// Baca seluruh search_routes ACL-filtered untuk tenant & role (dipakai GET /api/routes di server.ts)
+export function getSearchRoutes(clientId: string, role: string) {
+  const sql = `
+    SELECT sr.id, sr.job_id, sr.code, sr.title, sr.url_path, sr.description,
+           sr.keywords, sr.supported_intents, sr.allowed_params, sr.is_active, sr.client_id
+    FROM search_routes sr
+    JOIN acl a ON a.job_id = sr.job_id AND a.client_id = sr.client_id
+    JOIN groups g ON g.id = a.groups_id AND g.client_id = sr.client_id
+    WHERE sr.client_id = ?
+      AND UPPER(g.code) = ?
+      AND sr.is_active = 1
+      AND sr.deleted_at IS NULL
+      AND a.deleted_at IS NULL
+    ORDER BY sr.id ASC
+  `;
+  return db.query(sql).all(clientId, role.toUpperCase());
 }

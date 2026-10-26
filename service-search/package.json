@@ -12,6 +12,7 @@
     "node:cli": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
     "@types/ioredis": "^5.0.0",
     "ioredis": "^6.0.0",
     "picocolors": "^1.1.1"
