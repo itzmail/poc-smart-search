@@ -223,14 +223,14 @@ export function initDatabase() {
     insertJob.run("J01", "dashboard", "Dashboard Utama", "Statistik umum sekolah: total siswa, siswa aktif, dan ringkasan pembayaran", JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]), JSON.stringify(["LIST_MENU"]), JSON.stringify([]), null, 1, 1, "layout-dashboard", "1");
     insertJob.run("J02", "siswa", "Master Data Siswa", "Daftar dan profil data siswa, murid, dan santri dengan filter kelas dan status", JSON.stringify(["siswa", "murid", "santri", "pelajar", "data siswa", "profil"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "academic_year_id", "q"]), null, 2, 1, "users", "1");
     insertJob.run("J03", "nilai", "Penilaian Akademik Siswa", "Buku nilai siswa, rekap nilai harian, dan nilai per mata pelajaran", JSON.stringify(["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "semester", "mapel", "academic_year_id"]), null, 3, 1, "award", "1");
-    insertJob.run("J04", "spp", "Pembayaran & Tagihan SPP", "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah", "invoice"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "periode", "academic_year_id", "invoice_id"]), null, 4, 1, "credit-card", "1");
+    insertJob.run("J04", "spp", "Pembayaran & Tagihan SPP", "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah", "invoice"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "created_at", "periode", "academic_year_id", "invoice_id"]), null, 4, 1, "credit-card", "1");
     insertJob.run("J05", "rapot", "Cetak & Distribusi Rapot", "Aksi cetak dan unduh dokumen rapor siswa format PDF atau Excel", JSON.stringify(["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"]), JSON.stringify(["LIST_MENU", "REPORT_ACTION"]), JSON.stringify(["kelas", "semester", "format", "nama"]), null, 5, 1, "file-text", "1");
     insertJob.run("J06", "kelas", "Master Ruang Kelas", "Data ruang kelas, rombel, dan wali kelas per tingkat", JSON.stringify(["kelas", "ruang kelas", "rombel", "wali kelas", "tingkat"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["id", "tingkat"]), null, 6, 1, "school", "1");
 
     // Tenant 2 (Client ID: "2") - Menu Santri
     insertJob.run("J01_T2", "dashboard", "Dashboard Sekolah", "Statistik umum sekolah santri", JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]), JSON.stringify(["LIST_MENU"]), JSON.stringify([]), null, 1, 1, "layout-dashboard", "2");
     insertJob.run("J02_T2", "siswa", "Data Santri", "Daftar dan profil data santri dengan filter kelas dan status", JSON.stringify(["siswa", "murid", "santri", "pelajar", "data santri"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "q"]), null, 2, 1, "users", "2");
-    insertJob.run("J04_T2", "spp", "Kas & Syahriah (SPP)", "Kelola kas dan iuran syahriah santri, list santri nunggak", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "syahriah", "kas"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "periode", "academic_year_id"]), null, 3, 1, "credit-card", "2");
+    insertJob.run("J04_T2", "spp", "Kas & Syahriah (SPP)", "Kelola kas dan iuran syahriah santri, list santri nunggak", JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "syahriah", "kas"]), JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify(["kelas", "status", "created_at", "periode", "academic_year_id"]), null, 3, 1, "credit-card", "2");
 
     // Seed Groups (Role)
     const insertGroup = db.prepare(`
@@ -407,6 +407,27 @@ export function initDatabase() {
     db.query("INSERT OR IGNORE INTO siswa (id, nisn, nama, kelas, kelas_id, status, gender, client_id) VALUES ('S009', '0081234569', 'Siti Aisyah', '7A', 'K-07A', 'aktif', 'P', '1')").run();
   }
 
+  // Ensure tagihan SPP dengan jatuh_tempo dalam 7 hari terakhir (idempotent — untuk demo filter "minggu ini")
+  const activeAY = db.query("SELECT id FROM academic_year WHERE is_active = 1 AND client_id = '1'").get() as { id: string } | null;
+  if (activeAY) {
+    const insertRecentSPP = db.prepare(`
+      INSERT OR IGNORE INTO spp (id, siswa_id, nama_siswa, kelas, academic_year_id, bulan, nominal, status, jatuh_tempo, client_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '1')
+    `);
+    const recentSpp: [string, string, string, string, number, string, number][] = [
+      ["SPP007", "S001", "Budi Santoso", "8B", 500000, "nunggak", 3],
+      ["SPP008", "S006", "Farhan Nugraha", "8B", 500000, "nunggak", 5],
+      ["SPP009", "S002", "Siti Rahma", "8B", 500000, "lunas", 2],
+    ];
+    for (const [id, siswaId, nama, kelas, nominal, status, daysAgo] of recentSpp) {
+      const d = new Date();
+      d.setDate(d.getDate() - daysAgo);
+      const jatuhTempoRecent = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const bulan = `${d.toLocaleString("id-ID", { month: "long" })} ${d.getFullYear()}`;
+      insertRecentSPP.run(id, siswaId, nama, kelas, activeAY.id, bulan, nominal, status, jatuhTempoRecent);
+    }
+  }
+
   // Shared param configs (mengurangi duplikasi JSON antar route)
   const academicYearParam = {
     key: "academic_year_id",
@@ -418,22 +439,28 @@ export function initDatabase() {
     key: "kelas_id",
     endpoint: "/api/master/kelas",
     mode: "list",
-    hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b[789]\\s?[a-d]|\\b1[012]\\s?[a-d]",
   };
+  // wali_kelas dilewati bila ada kata penunjuk siswa ("anak/siswa/student/...") dan tidak ada
+  // kata penunjuk wali ("wali/guru/ibu/bapak"); selain itu aktif untuk kata berhuruf >= 4
+  const waliKelasHint =
+    "^(?!(?=.*\\b(siswa|anak|murid|student|santri)\\b)(?!.*\\b(wali|guru|ibu|bapak)\\b))(?:.*\\b(wali|guru|ibu|bapak|bu\\s|pak\\s)\\b|.*[a-z]{4,})";
+  const nilaiSiswaParam = { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" };
   const statusSppParam = {
     key: "status",
     hint_regex: "\\b(status|lunas|nunggak|bayar|tunggakan|hutang|setor|nyetor|duit|uang|manarin|piring)\\b",
     mode: "enum",
     values: {
       nunggak: "\\b(nunggak|belum\\s*(bayar|lunas|setor|nyetor)|tertunggak|terlambat\\s*bayar|masih\\s*hutang|manarin)\\b|\\bpiring\\b",
-      lunas: "\\b(lunas|sudah\\s*(bayar|lunas|setor|nyetor)|pembayaran\\s*selesai|bebas\\s*tunggakan)\\b",
+      lunas: "\\b(lunas|(sudah|udah)\\s*(bayar|lunas|setor|nyetor|kasih\\s*(duit|uang))|pembayaran\\s*selesai|bebas\\s*tunggakan)\\b",
     },
   };
-  const periodeParam = {
-    key: "periode",
-    // Gate semantik: enum periode hanya aktif bila kalimat memuat kata waktu
+  const createdAtParam = {
+    key: "created_at",
+    mode: "date_range",
+    param_gte: "created_at.$gte",
+    param_lte: "created_at.$lte",
+    // Gate semantik: enum date_range hanya aktif bila kalimat memuat kata waktu
     hint_regex: "\\b(hari|minggu|bulan|tahun|semester|kemarin|lalu|sekarang|berjalan|this\\s*(week|month|year))\\b",
-    mode: "enum",
     values: {
       hari_ini: "\\b(hari\\s*ini)\\b",
       minggu_ini: "\\b(minggu\\s*(ini|berjalan|sekarang)|7\\s*hari\\s*(terakhir|ini))\\b",
@@ -442,6 +469,10 @@ export function initDatabase() {
       tahun_ini: "\\b(tahun\\s*(ini|sekarang))\\b",
       tahun_lalu: "\\b(tahun\\s*(lalu|kemarin|sebelumnya)|tahun\\s*yang\\s*lalu)\\b",
     },
+  };
+  const periodeParam = {
+    ...createdAtParam,
+    key: "periode",
   };
   const semesterParam = {
     key: "semester",
@@ -466,11 +497,32 @@ export function initDatabase() {
       genap: "\\b(genap|semester\\s*2|sem\\s*2)\\b",
     },
   };
-  const enumRows = db.query("SELECT id, allowed_params FROM search_routes").all() as any[];
+  const enumRows = db.query("SELECT id, code, allowed_params FROM search_routes").all() as any[];
   for (const row of enumRows) {
     const specs: any[] = JSON.parse(row.allowed_params || "[]");
     let changed = false;
+    // DB lama: route nilai belum bisa meresolve nama siswa
+    if (row.code === "nilai" && !specs.some((s) => s.key === "siswa_id")) {
+      specs.unshift(nilaiSiswaParam);
+      changed = true;
+    }
     for (const spec of specs) {
+      // DB lama: kelas/mapel tidak lagi digerbang hint_regex (master list kecil & ter-cache,
+      // nama kelas/mapel dinamis tidak selalu memuat kata "kelas"/"nilai")
+      if ((spec.mode ?? "list") === "list" && (spec.key === "kelas_id" || spec.key === "subject_id") && spec.hint_regex) {
+        delete spec.hint_regex;
+        changed = true;
+      }
+      // DB lama: kata "rola" (typo seed tenant 2) tidak boleh jadi pemicu siswa_id
+      if (spec.key === "siswa_id" && spec.hint_regex?.includes("|\\brola\\b")) {
+        spec.hint_regex = spec.hint_regex.replace("|\\brola\\b", "");
+        changed = true;
+      }
+      // DB lama: samakan hint_regex wali_kelas dengan konstanta kode
+      if (spec.key === "wali_kelas" && spec.hint_regex !== waliKelasHint) {
+        spec.hint_regex = waliKelasHint;
+        changed = true;
+      }
       const defaults = DEFAULT_ENUM_VALUES[spec.key];
       if ((spec.mode ?? "") === "enum" && defaults) {
         if (spec.key === "periode" && !spec.hint_regex) {
@@ -500,6 +552,63 @@ export function initDatabase() {
     }
   }
 
+  // Teacher master (test data for name-collision cases). Idempotent: safe on existing DBs.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS guru (
+      id TEXT PRIMARY KEY,
+      nama TEXT NOT NULL,
+      mapel TEXT,
+      wali_kelas_id TEXT,
+      client_id TEXT NOT NULL
+    );
+  `);
+  const insertGuru = db.prepare(`
+    INSERT OR IGNORE INTO guru (id, nama, mapel, wali_kelas_id, client_id) VALUES (?, ?, ?, ?, ?)
+  `);
+  const guruList = [
+    // Homeroom teachers match master_kelas.wali_kelas
+    ["G-001", "Siti Aminah, S.Pd", "Bahasa Indonesia", "K-07A", "1"],
+    ["G-002", "Bambang Susanto, S.Pd", "IPS", "K-07C", "1"],
+    ["G-003", "Ahmad Fauzi, M.Pd", "Matematika", "K-08B", "1"],
+    ["G-004", "Nurul Hidayati, S.Si", "Ilmu Pengetahuan Alam", "K-09A", "1"],
+    // Subject teachers without a class; "Siti" collides with student and homeroom names
+    ["G-005", "Siti Nurhaliza, S.Pd", "Bahasa Inggris", null, "1"],
+    ["G-006", "Rina Wulandari, S.Pd", "Matematika", null, "1"],
+    // Tenant 2
+    ["G-101", "Ustadz Abdullah", "Nahwu", "K-10A_T2", "2"],
+    ["G-102", "Ustadz Yusuf", "Sharaf", null, "2"],
+  ];
+  for (const g of guruList) insertGuru.run(...g);
+
+  // Guru job + route + ACL (idempotent; INSERT OR IGNORE keeps existing rows untouched)
+  const guruKeywords = JSON.stringify(["guru", "pengajar", "ustadz", "dewan guru", "mengajar", "wali kelas"]);
+  const guruParams = JSON.stringify([
+    { key: "guru_id", endpoint: "/api/guru", mode: "search", query_param: "q" },
+  ]);
+  const guruDesc = "Data guru dan pengajar: nama, mata pelajaran yang diampu, dan kelas yang diwalikan";
+  const guruIntents = JSON.stringify(["LIST_MENU", "DIRECT_LINK"]);
+  const insGuruJob = db.prepare(`
+    INSERT OR IGNORE INTO job (id, code, name, description, keywords, supported_intents, allowed_params, parent, ordering, display, icon, client_id)
+    VALUES (?, 'guru', ?, ?, ?, ?, ?, NULL, 7, 1, 'user-check', ?)
+  `);
+  const insGuruRoute = db.prepare(`
+    INSERT OR IGNORE INTO search_routes (id, job_id, code, title, url_path, description, keywords, supported_intents, allowed_params, is_active, client_id)
+    VALUES (?, ?, 'guru', ?, '/guru', ?, ?, ?, ?, 1, ?)
+  `);
+  const insGuruAcl = db.prepare(`
+    INSERT OR IGNORE INTO acl (id, groups_id, job_id, add_priv, edit_priv, remove_priv, delete_priv, client_id)
+    VALUES (?, ?, ?, 1, 1, 1, 1, ?)
+  `);
+  insGuruJob.run("J07", "Master Data Guru", guruDesc, guruKeywords, guruIntents, guruParams, "1");
+  insGuruRoute.run("SR-07", "J07", "Master Data Guru", guruDesc, guruKeywords, guruIntents, guruParams, "1");
+  insGuruAcl.run("ACL30", "G01", "J07", "1"); // SUPERADMIN
+  insGuruAcl.run("ACL31", "G02", "J07", "1"); // GURU
+  insGuruAcl.run("ACL32", "G03", "J07", "1"); // KEUANGAN
+  insGuruJob.run("J07_T2", "Data Ustadz", guruDesc, guruKeywords, guruIntents, guruParams, "2");
+  insGuruRoute.run("SR-07_T2", "J07_T2", "Data Ustadz", guruDesc, guruKeywords, guruIntents, guruParams, "2");
+  insGuruAcl.run("ACL33", "G01_T2", "J07_T2", "2");
+  insGuruAcl.run("ACL34", "G02_T2", "J07_T2", "2");
+
   if (routeCount.count === 0) {
     const insertRoute = db.prepare(`
       INSERT INTO search_routes (id, job_id, code, title, url_path, description, keywords, supported_intents, allowed_params, is_active, client_id)
@@ -526,7 +635,8 @@ export function initDatabase() {
       "Buku nilai siswa, rekap nilai harian, dan nilai per mata pelajaran",
       JSON.stringify(["nilai", "akademik", "skor", "ulangan", "rapor nilai"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
-        { key: "subject_id", endpoint: "/api/master/subjects", mode: "list", hint_regex: "nila|mapel|pelajaran|matematika|mtk|ipa|sains|ips|bahasa" },
+        nilaiSiswaParam,
+        { key: "subject_id", endpoint: "/api/master/subjects", mode: "list" },
         kelasParam,
         semesterParam,
         academicYearParam,
@@ -536,10 +646,10 @@ export function initDatabase() {
       "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran",
       JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
-        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", hint_regex: "\\b(siapa|siswa|murid|santri|anak)\\b|\\b(budi|siti|ahmad|dewi|rian|farhan|putri)\\b" },
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
         kelasParam,
         statusSppParam,
-        periodeParam,
+        createdAtParam,
         academicYearParam,
       ]), "1");
 
@@ -559,7 +669,7 @@ export function initDatabase() {
         // Bridge param: cari nama siswa via /api/siswa, hasil siswa menyebut kelasnya (kelas_id)
         { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", resolves_to: "kelas_id" },
         // List param: cek wali_kelas di master kelas via match_field
-        { key: "wali_kelas", endpoint: "/api/master/kelas", mode: "list", match_field: "wali_kelas", resolves_to: "kelas_id", hint_regex: "\\b(wali|guru|ibu|bapak|bu\\s|pak\\s)\\b|[a-z]{4,}" },
+        { key: "wali_kelas", endpoint: "/api/master/kelas", mode: "list", match_field: "wali_kelas", resolves_to: "kelas_id", hint_regex: waliKelasHint },
         // List param: cocokkan nama/kode kelas langsung
         kelasParam,
       ]), "1");
@@ -575,7 +685,7 @@ export function initDatabase() {
       JSON.stringify(["siswa", "murid", "santri", "pelajar", "data santri"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
         { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
-        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list", hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b10\\s?[a-d]" },
+        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list" },
         { key: "status", mode: "enum", values: { aktif: "\\b(aktif|masih\\s*belajar)\\b", pindah: "\\b(pindah|pindahan)\\b" } },
       ]), "2");
 
@@ -583,10 +693,10 @@ export function initDatabase() {
       "Kelola kas dan iuran syahriah santri, list santri nunggak",
       JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "syahriah", "kas"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
-        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", hint_regex: "\\b(siapa|santri|murid|anak)\\b|\\bbu\\b|\\bpak\\b|\\bibu\\b|\\bbapak\\b|\\b(wali|guru)\\b|\\brola\\b" },
-        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list", hint_regex: "\\bkelas\\b|\\b(ruang|rombel|tingkat)\\b|\\b10\\s?[a-d]" },
+        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q", hint_regex: "\\b(siapa|santri|murid|anak)\\b|\\bbu\\b|\\bpak\\b|\\bibu\\b|\\bbapak\\b|\\b(wali|guru)\\b" },
+        { key: "kelas_id", endpoint: "/api/master/kelas", mode: "list" },
         statusSppParam,
-        periodeParam,
+        createdAtParam,
         academicYearParam,
       ]), "2");
   }

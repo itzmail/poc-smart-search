@@ -1,17 +1,21 @@
 import pc from "picocolors";
 import { cacheGet, cacheSet, DEFAULT_TTL_SECONDS } from "./cache/redis.js";
+import { appEducationBreaker } from "./breaker.js";
 
 // Kontrak descriptor satu query-param yang dikenali sebuah route.
 // Sumber kebenaran: kolom JSON `search_routes.allowed_params` (tabel DB).
 // mode:
-//   "list"   -> master list kecil, dicocokkan ke token query (butuh endpoint)
-//   "search" -> pencarian entity per-token via query_param (butuh endpoint)
-//   "enum"   -> nilai dari regex DB (values) atau semantic fallback (tanpa endpoint)
+//   "list"       -> master list kecil, dicocokkan ke token query (butuh endpoint)
+//   "search"     -> pencarian entity per-token via query_param (butuh endpoint)
+//   "enum"       -> nilai dari regex DB (values) atau semantic fallback (tanpa endpoint)
+//   "date_range" -> rentang tanggal (gte & lte) yang dihitung dari hint waktu (tanpa endpoint)
 export interface ParamSpec {
   key: string;
   endpoint?: string;
-  mode?: "list" | "search" | "enum";
+  mode?: "list" | "search" | "enum" | "date_range";
   query_param?: string;
+  param_gte?: string;
+  param_lte?: string;
   match_field?: string;
   resolves_to?: string;
   hint_regex?: string;
@@ -44,7 +48,10 @@ export interface ActiveContext {
 export interface RoutesManifest {
   routes: AppRoute[];
   active_context?: ActiveContext;
+  degraded?: boolean;
 }
+
+const DEGRADED_TTL_SECONDS = parseInt(process.env.SMARTSEARCH_DEGRADED_TTL || "20", 10);
 
 export interface ResolvedEntity {
   type: "kelas" | "invoice" | "siswa" | "agregasi";
@@ -132,7 +139,7 @@ export async function getRoutesManifest(
         const parsed = JSON.parse(cached);
         // Format baru: { routes, active_context }
         if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.routes)) {
-          return { routes: parsed.routes, active_context: parsed.active_context };
+          return { routes: parsed.routes, active_context: parsed.active_context, degraded: parsed.degraded };
         }
         // Format lama (array routes saja)
         if (Array.isArray(parsed)) return { routes: parsed };
@@ -141,34 +148,41 @@ export async function getRoutesManifest(
   }
 
   // 2. Fetch fresh manifest dari Backend App Pendidikan dengan header ACL Pintro
-  try {
-    const res = await fetch(`${APP_EDUCATION_URL}/api/routes`, {
-      headers: {
-        "X-Client-Id": clientId,
-        "X-User-Role": role,
-        ...(auth ? { Authorization: auth } : {}),
-      },
-      signal: AbortSignal.timeout(1500),
-    });
+  if (appEducationBreaker.allow()) {
+    try {
+      const res = await fetch(`${APP_EDUCATION_URL}/api/routes`, {
+        headers: {
+          "X-Client-Id": clientId,
+          "X-User-Role": role,
+          ...(auth ? { Authorization: auth } : {}),
+        },
+        signal: AbortSignal.timeout(1500),
+      });
 
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.routes) && data.routes.length > 0) {
-        const manifest: RoutesManifest = {
-          routes: data.routes,
-          active_context: data.active_context,
-        };
-        await cacheSet(routesCacheKey, JSON.stringify(manifest), DEFAULT_TTL_SECONDS);
-        return manifest;
+      if (res.ok) {
+        appEducationBreaker.success();
+        const data = await res.json();
+        if (Array.isArray(data.routes) && data.routes.length > 0) {
+          const manifest: RoutesManifest = {
+            routes: data.routes,
+            active_context: data.active_context,
+          };
+          await cacheSet(routesCacheKey, JSON.stringify(manifest), DEFAULT_TTL_SECONDS);
+          return manifest;
+        }
+      } else {
+        appEducationBreaker.failure();
       }
+    } catch {
+      // Backend mungkin belum nyala, gunakan fallback
+      appEducationBreaker.failure();
     }
-  } catch {
-    // Backend mungkin belum nyala, gunakan fallback
   }
 
-  // 3. Fallback ke memory lokal jika backend belum dapat dijangkau
-  const fallbackManifest: RoutesManifest = { routes: FALLBACK_ROUTES };
-  await cacheSet(routesCacheKey, JSON.stringify(fallbackManifest), DEFAULT_TTL_SECONDS);
+  // 3. Fallback ke routes bawaan: tandai degraded dan cache singkat agar blip sesaat
+  //    tidak mengunci tenant tanpa filter selama TTL penuh
+  const fallbackManifest: RoutesManifest = { routes: FALLBACK_ROUTES, degraded: true };
+  await cacheSet(routesCacheKey, JSON.stringify(fallbackManifest), DEGRADED_TTL_SECONDS);
   return fallbackManifest;
 }
 

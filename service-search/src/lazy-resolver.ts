@@ -11,12 +11,17 @@ import pc from "picocolors";
 import type { ActiveContext, AppRoute, ParamSpec } from "./routes-sync.js";
 import type { RawExtraction } from "./extractor.js";
 import { cacheGet, cacheSet } from "./cache/redis.js";
-import { semanticSimilarity, semanticEnumMatch } from "./local-model.js";
+import { semanticSimilarity, semanticEnumMatch, semanticListMatch, embedQuery, type SemanticMatchDetail } from "./local-model.js";
+import type { ResolverTrace, ExtractorTrace } from "./tracer.js";
+import { appEducationBreaker } from "./breaker.js";
 
 const APP_EDUCATION_URL = process.env.APP_EDUCATION_URL || "http://127.0.0.1:3000";
 
 // TTD default 30 menit (bisa dioverride per spec melalui field ttl di DB)
 const DEFAULT_TTL = parseInt(process.env.SMARTSEARCH_MASTER_TTL || "1800", 10);
+
+// Salinan stale master list: disajikan bila app-education gagal (stale-while-error)
+const STALE_TTL = 86400;
 
 export interface MasterItem {
   id: string;
@@ -62,6 +67,18 @@ function normalizeItems(json: any): MasterItem[] {
   }));
 }
 
+async function guarded<T>(fn: () => Promise<T>): Promise<T> {
+  if (!appEducationBreaker.allow()) throw new Error("app-education circuit open");
+  try {
+    const out = await fn();
+    appEducationBreaker.success();
+    return out;
+  } catch (err) {
+    appEducationBreaker.failure();
+    throw err;
+  }
+}
+
 async function fetchMasterList(endpoint: string, clientId: string, role: string, auth?: string): Promise<MasterItem[]> {
   const res = await fetch(`${APP_EDUCATION_URL}${endpoint}`, {
     headers: {
@@ -90,22 +107,41 @@ async function fetchSearch(endpoint: string, queryParam: string, token: string, 
 }
 
 // Lazy load master list: Redis cache -> (miss) single-flight HTTP fetch -> Redis
-async function lazyList(endpoint: string, specKey: string, clientId: string, role: string, auth?: string, ttl = DEFAULT_TTL): Promise<MasterItem[]> {
+async function lazyList(
+  endpoint: string, specKey: string, clientId: string, role: string, auth?: string, ttl = DEFAULT_TTL,
+  traceOps?: { redis?: Array<{ key: string; op: "GET" | "SET"; status: "HIT" | "MISS" }>; http?: Array<{ endpoint: string; param: string; query_token?: string; results_count: number }> }
+): Promise<MasterItem[]> {
   const cacheKey = `smartsearch:master:${clientId}:${specKey}`;
   const cached = await cacheGet(cacheKey);
   if (cached) {
+    if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "GET", status: "HIT" });
     try {
       return JSON.parse(cached);
     } catch {}
   }
+  if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "GET", status: "MISS" });
 
   const lockKey = cacheKey;
   const existing = inFlightFetch.get(lockKey);
   if (existing) return await existing;
 
   const promise = (async (): Promise<MasterItem[]> => {
-    const items = await fetchMasterList(endpoint, clientId, role, auth);
+    let items: MasterItem[];
+    try {
+      items = await guarded(() => fetchMasterList(endpoint, clientId, role, auth));
+    } catch (err) {
+      const stale = await cacheGet(`${cacheKey}:stale`);
+      if (stale) {
+        try {
+          return JSON.parse(stale);
+        } catch {}
+      }
+      throw err;
+    }
+    if (traceOps?.http) traceOps.http.push({ endpoint, param: specKey, results_count: items.length });
     await cacheSet(cacheKey, JSON.stringify(items), ttl);
+    await cacheSet(`${cacheKey}:stale`, JSON.stringify(items), STALE_TTL);
+    if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "SET", status: "HIT" });
     return items;
   })().finally(() => {
     inFlightFetch.delete(lockKey);
@@ -117,23 +153,34 @@ async function lazyList(endpoint: string, specKey: string, clientId: string, rol
 // Lazy load hasil pencarian entity (?q=token): Redis cache per token
 async function lazySearch(
   endpoint: string, queryParam: string, specKey: string, token: string,
-  clientId: string, role: string, auth?: string, ttl = DEFAULT_TTL
+  clientId: string, role: string, auth?: string, ttl = DEFAULT_TTL,
+  traceOps?: { redis?: Array<{ key: string; op: "GET" | "SET"; status: "HIT" | "MISS" }>; http?: Array<{ endpoint: string; param: string; query_token?: string; results_count: number }> }
 ): Promise<MasterItem[]> {
   const cacheKey = `smartsearch:lookup:${clientId}:${specKey}:${token.toLowerCase()}`;
   const cached = await cacheGet(cacheKey);
   if (cached) {
+    if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "GET", status: "HIT" });
     try {
       return JSON.parse(cached);
     } catch {}
   }
+  if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "GET", status: "MISS" });
 
   const lockKey = cacheKey;
   const existing = inFlightFetch.get(lockKey);
   if (existing) return await existing;
 
   const promise = (async (): Promise<MasterItem[]> => {
-    const items = await fetchSearch(endpoint, queryParam, token, clientId, role, auth);
+    let items = await guarded(() => fetchSearch(endpoint, queryParam, token, clientId, role, auth));
+    if (traceOps?.http) traceOps.http.push({ endpoint, param: specKey, query_token: token, results_count: items.length });
+    if (items.length === 0 && norm(token).length > FUZZY_PREFIX_LEN) {
+      const prefix = norm(token).slice(0, FUZZY_PREFIX_LEN);
+      const candidates = (await guarded(() => fetchSearch(endpoint, queryParam, prefix, clientId, role, auth))).slice(0, FUZZY_MAX_CANDIDATES);
+      if (traceOps?.http) traceOps.http.push({ endpoint, param: specKey, query_token: prefix, results_count: candidates.length });
+      items = fuzzyRank(token, candidates);
+    }
     await cacheSet(cacheKey, JSON.stringify(items), ttl);
+    if (traceOps?.redis) traceOps.redis.push({ key: cacheKey, op: "SET", status: "HIT" });
     return items;
   })().finally(() => {
     inFlightFetch.delete(lockKey);
@@ -146,14 +193,66 @@ function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/gi, "");
 }
 
-// Cocokkan token ke satu field item master
-function tokenMatchesItem(token: string, field: string): boolean {
+// Typo tolerance for name search: used only when the exact ?q=<token> lookup is empty.
+const FUZZY_MAX_DIST = Number(process.env.FUZZY_MAX_DIST ?? 2);
+const FUZZY_PREFIX_LEN = 3;
+const FUZZY_MAX_CANDIDATES = 20;
+
+function levenshtein(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function fuzzyMaxDist(t: string): number {
+  return Math.min(t.length <= 4 ? 1 : 2, FUZZY_MAX_DIST);
+}
+
+// Edit distance between a normalized token and the closest word of a field.
+function closestWordDist(t: string, field: string): number {
+  return Math.min(...field.toLowerCase().split(/\s+/).map((w) => levenshtein(t, norm(w))));
+}
+
+// Keep only the candidates whose closest name word is nearest to the token; ties are all kept.
+function fuzzyRank(token: string, items: MasterItem[]): MasterItem[] {
+  const t = norm(token);
+  const maxDist = fuzzyMaxDist(t);
+  const scored = items
+    .map((item) => ({ item, dist: closestWordDist(t, item.name) }))
+    .filter((x) => x.dist <= maxDist);
+  if (scored.length === 0) return [];
+  const best = Math.min(...scored.map((x) => x.dist));
+  return scored.filter((x) => x.dist === best).map((x) => x.item);
+}
+
+// Match strength of a token/phrase against one master field (0 = no match):
+// 3 = exact, or the whole field appears inside the phrase ("bahasa inggris" in the query)
+// 2 = token is a whole word of the field ("siti" in "Siti Rahma")
+// 1 = token is only a substring of the field
+function matchTier(token: string, field: string): number {
   const t = norm(token);
   const f = norm(field);
-  if (!t || !f) return false;
-  if (f === t) return true;           // exact (careful: "matematika" ✅)
-  if (f.includes(t) || t.includes(f)) return true; // bidirectional contains: "siti" ⊂ "siti rahma", "matematika" ⊂ full query ✅
-  return false;
+  if (!t || !f) return 0;
+  if (f === t || t.includes(f)) return 3;
+  if (f.includes(t)) return field.toLowerCase().split(/[^a-z0-9]+/).includes(t) ? 2 : 1;
+  return 0;
+}
+
+// Abbreviation such as "mtk" -> "Matematika" or "ipa" -> "Ilmu Pengetahuan Alam":
+// same first letter and the token's letters appear in order inside the field.
+function isAbbreviation(token: string, field: string): boolean {
+  const t = norm(token);
+  const f = norm(field);
+  if (t.length < 3 || !/^[a-z]+$/.test(t) || t[0] !== f[0]) return false;
+  let i = 0;
+  for (const c of f) if (c === t[i]) i++;
+  return i === t.length;
 }
 
 // Regex helper aman dengan cache agar tidak melempar SyntaxError bila DB regex rusak
@@ -181,6 +280,10 @@ export interface LazyResolveContext {
 
 export interface ResolveOptions {
   maxOptionsPerParam?: number;
+  resolverTrace?: ResolverTrace;
+  extractorTrace?: ExtractorTrace;
+  // Out-param: di-set degraded=true bila ada fetch upstream yang gagal dan ditelan
+  state?: { degraded: boolean };
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +297,22 @@ export async function resolveParams(
 ): Promise<ResolvedParam[]> {
   const maxPerParam = opts.maxOptionsPerParam ?? 10;
   const out: ResolvedParam[] = [];
+  const rTrace = opts.resolverTrace;
+  const eTrace = opts.extractorTrace;
+  const markDegraded = () => {
+    if (opts.state) opts.state.degraded = true;
+  };
+
+  if (rTrace) {
+    rTrace.param_specs_evaluated = specs.map((s) => s.key);
+  }
+
+  const traceOps = rTrace
+    ? {
+        redis: rTrace.redis_operations,
+        http: rTrace.http_calls,
+      }
+    : undefined;
 
   const listParams = specs.filter((s) => (s.mode ?? "list") === "list" && s.endpoint);
   const searchParams = specs.filter((s) => s.mode === "search" && s.endpoint);
@@ -206,36 +325,80 @@ export async function resolveParams(
   for (const spec of listParams) {
     if (spec.key === "academic_year_id") continue;
     // Trigger detection: hanya fetch master jika slot ini relevan di kalimat
-    if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) continue;
+    if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) {
+      if (rTrace) rTrace.token_exclusion.skipped_calls.push(`${spec.key} (hint_regex mismatch)`);
+      continue;
+    }
 
     listWork.push(
-      lazyList(spec.endpoint!, spec.key, ctx.clientId, ctx.role, ctx.auth).then((items) => {
-        const matches = matchListItems(extraction, spec, items);
+      lazyList(spec.endpoint!, spec.key, ctx.clientId, ctx.role, ctx.auth, DEFAULT_TTL, traceOps).then(async (items) => {
+        let matches = matchListItems(extraction, spec, items);
+        let source: "exact" | "semantic" = "exact";
+        // Last resort: transformer, only for name-based lists (not people names via match_field)
+        if (matches.length === 0 && !spec.match_field) {
+          const tokens = extraction.tokens.filter((t) => /^[a-z]{4,}$/.test(norm(t))).slice(0, 3);
+          const hit = await semanticListMatch(tokens, items).catch(() => null);
+          const found = hit ? items.find((i) => i.id === hit.id) : undefined;
+          if (found) {
+            matches = [found];
+            source = "semantic";
+          }
+        }
         if (matches.length === 0) return null;
         // Catat token yang sudah terpakai sebagai kelas/mapel
         for (const m of matches) {
           if (m.code) consumedTokens.add(norm(m.code));
           if (m.name) consumedTokens.add(norm(m.name));
         }
-        return { spec, values: matches, source: "exact" as const };
-      }).catch(() => null)
+        return { spec, values: matches, source };
+      }).catch(() => {
+        markDegraded();
+        return null;
+      })
     );
   }
 
   const resolvedLists = (await Promise.all(listWork)).filter(Boolean) as ResolvedParam[];
 
-  // --- mode "enum": nilai dari extractor (regex negation-aware, 0 HTTP call) ---
+  // --- mode "enum" & "date_range": nilai dari extractor (regex negation-aware, 0 HTTP call) ---
   // Lapisan ke-2 (semantic transformers.js): bila regex DB tidak kena (frasa colloquial
   // seperti "thn ajaran sekarang", "kasih duit"), cycle similarity query vs valueKey.
   const enumFallbackWork: Promise<{ spec: ParamSpec; source: "enum" | "semantic" } | null>[] = [];
+  let queryVecP: Promise<number[] | null> | undefined; // query embedded once per request, shared by all specs
   for (const spec of specs) {
-    if ((spec.mode ?? null) !== "enum" || !spec.values) continue;
-    if (extraction.enumValues[spec.key]) continue;
-    // Gate hint_regex (mis. periode hanya semantik aktif bila kalimat memuat kata waktu)
-    if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) continue;
+    if (((spec.mode ?? null) !== "enum" && spec.mode !== "date_range") || !spec.values) continue;
+    if (extraction.enumValues[spec.key]) {
+      // Regex L1 already resolved this slot -> transformers.js is in STANDBY
+      if (eTrace) {
+        eTrace.transformers_status.push({
+          param: spec.key,
+          status: "STANDBY",
+          matched_value: extraction.enumValues[spec.key],
+        });
+      }
+      continue;
+    }
+    // No hint_regex gate: the hand-written hint tends to miss the same colloquial phrasing the
+    // regex values missed. semanticEnumMatch's score + margin thresholds guard false positives.
     enumFallbackWork.push(
       (async () => {
-        const semanticKey = await semanticEnumMatch(extraction.query, spec.values!).catch((e) => { return null; });
+        let detailCapture: SemanticMatchDetail | undefined;
+        queryVecP ??= embedQuery(extraction.query).catch(() => null);
+        const semanticKey = await semanticEnumMatch(extraction.query, spec.values!, (detail) => {
+          detailCapture = detail;
+        }, await queryVecP).catch(() => null);
+
+        if (eTrace && detailCapture) {
+          eTrace.transformers_status.push({
+            param: spec.key,
+            status: "ENGAGED",
+            score: detailCapture.bestScore,
+            margin: detailCapture.margin,
+            matched_value: semanticKey || undefined,
+            reason: semanticKey ? "High cosine similarity" : "Below threshold or margin gate",
+          });
+        }
+
         if (!semanticKey) return null;
         extraction.enumValues[spec.key] = semanticKey;
         return { spec, source: "semantic" as const };
@@ -243,9 +406,9 @@ export async function resolveParams(
     );
   }
   const enumFallbacks = (await Promise.all(enumFallbackWork)).filter(Boolean) as { spec: ParamSpec; source: "enum" | "semantic" }[];
-  // Semua slot enum yang sudah terisi (regex di atas / semantic fallback di sini)
+  // Semua slot enum / date_range yang sudah terisi (regex di atas / semantic fallback di sini)
   // masuk ke enumParams agar dispatcher memiliki label sumber + filter yang valid.
-  const enumSpecs = specs.filter((s) => (s.mode ?? null) === "enum" && extraction.enumValues[s.key]);
+  const enumSpecs = specs.filter((s) => ((s.mode ?? null) === "enum" || s.mode === "date_range") && extraction.enumValues[s.key]);
   const enumParams = enumSpecs.map((spec) => {
     const fb = enumFallbacks.find((r) => r.spec === spec);
     return { spec, values: [] as MasterItem[], source: (fb ? fb.source : "enum") as "enum" | "semantic" };
@@ -255,12 +418,18 @@ export async function resolveParams(
   // Hanya menembak token yang BELUM terpakai oleh master list (misal: "8b" sudah terpakai
   // sebagai kelas_id, maka tidak akan ditembak ke /api/siswa?q=8b).
   const searchWork = searchParams.map(async (spec) => {
-    if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) return null;
+    if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) {
+      if (rTrace) rTrace.token_exclusion.skipped_calls.push(`${spec.key} (hint_regex mismatch)`);
+      return null;
+    }
     if (extraction.tokens.length === 0) return null;
 
     // Filter token: buang token yang sudah teridentifikasi sebagai kelas/mapel
     const availableTokens = extraction.tokens.filter((t) => !consumedTokens.has(norm(t)));
-    if (availableTokens.length === 0) return null;
+    if (availableTokens.length === 0) {
+      if (rTrace) rTrace.token_exclusion.skipped_calls.push(`${spec.key} (0 unassigned tokens left - token exclusion)`);
+      return null;
+    }
 
     // Cap 3 token distinct per param (anti-bombardir endpoint utk kalimat panjang)
     const seen = new Set<string>();
@@ -272,7 +441,10 @@ export async function resolveParams(
     }).slice(0, 3);
 
     const results = await Promise.all(
-      uniqueTokens.map((t) => lazySearch(spec.endpoint!, spec.query_param || "q", spec.key, t, ctx.clientId, ctx.role, ctx.auth).catch(() => [] as MasterItem[]))
+      uniqueTokens.map((t) => lazySearch(spec.endpoint!, spec.query_param || "q", spec.key, t, ctx.clientId, ctx.role, ctx.auth, DEFAULT_TTL, traceOps).catch(() => {
+        markDegraded();
+        return [] as MasterItem[];
+      }))
     );
     const merged = [...new Map(results.flat().map((item) => [item.id + item.name, item])).values()].slice(0, maxPerParam);
     if (merged.length === 0) return null;
@@ -282,6 +454,11 @@ export async function resolveParams(
   const resolvedSearches = (await Promise.all(searchWork)).filter(Boolean) as ResolvedParam[];
   out.push(...resolvedLists, ...resolvedSearches, ...enumParams);
 
+  if (rTrace) {
+    rTrace.token_exclusion.consumed = [...consumedTokens];
+    rTrace.token_exclusion.remaining = extraction.tokens.filter((t) => !consumedTokens.has(norm(t)));
+  }
+
   // --- Slot "academic_year_id": utamakan tahun eksplisit (mis. "2024/2025") sebelum relative active context ---
   const aySpec = specs.find((s) => s.key === "academic_year_id");
   const explicitYearMatch = extraction.query.match(/\b(\d{4}\/\d{4})\b/);
@@ -289,10 +466,22 @@ export async function resolveParams(
   if (aySpec && aySpec.endpoint && explicitYearMatch) {
     // Explicit tahun (mis. "2024/2025") → match dari master API
     try {
-      const items = await lazyList(aySpec.endpoint, aySpec.key, ctx.clientId, ctx.role, ctx.auth);
+      const items = await lazyList(aySpec.endpoint, aySpec.key, ctx.clientId, ctx.role, ctx.auth, DEFAULT_TTL, traceOps);
       const found = items.filter((i) => norm(i.name) === norm(explicitYearMatch[1]));
       if (found.length > 0) out.push({ spec: aySpec, values: found, source: "exact" });
-    } catch {}
+    } catch {
+      markDegraded();
+    }
+  } else if (aySpec && aySpec.endpoint && extraction.timeHints.tahun_ajaran_lalu) {
+    // "tahun ajaran lalu" -> the year right after the active one (master list is newest first)
+    try {
+      const items = await lazyList(aySpec.endpoint, aySpec.key, ctx.clientId, ctx.role, ctx.auth, DEFAULT_TTL, traceOps);
+      const activeIdx = items.findIndex((i) => i.is_active === 1);
+      const previous = activeIdx >= 0 ? items[activeIdx + 1] : undefined;
+      if (previous) out.push({ spec: aySpec, values: [previous], source: "exact" });
+    } catch {
+      markDegraded();
+    }
   } else if (aySpec && aySpec.endpoint && (extraction.timeHints.tahun_ajaran_ini || extraction.timeHints.tahun_ini) && ctx.activeContext?.academic_year_id) {
     out.push({
       spec: aySpec,
@@ -302,10 +491,18 @@ export async function resolveParams(
   } else if (aySpec && aySpec.endpoint && extraction.timeHints.tahun_ajaran_ini) {
     // "tahun ajaran ini" tapi active_context kosong → fallback: master API is_active=1
     try {
-      const items = await lazyList(aySpec.endpoint, aySpec.key, ctx.clientId, ctx.role, ctx.auth);
+      const items = await lazyList(aySpec.endpoint, aySpec.key, ctx.clientId, ctx.role, ctx.auth, DEFAULT_TTL, traceOps);
       const active = items.filter((i) => i.is_active === 1);
       if (active.length > 0) out.push({ spec: aySpec, values: active, source: "exact" });
-    } catch {}
+    } catch {
+      markDegraded();
+    }
+  }
+
+  if (rTrace) {
+    for (const r of out) {
+      rTrace.resolved_params[r.spec.key] = r.values.map((v) => ({ id: v.id, name: v.name }));
+    }
   }
 
   return out;
@@ -334,17 +531,58 @@ function matchListItems(extraction: RawExtraction, spec: ParamSpec, items: Maste
   // wali kelas param: match_field wali_kelas
   if (spec.match_field && spec.match_field === "wali_kelas") fields.push((i) => i.wali_kelas || "");
   fields.push((i) => i.name);
+  const fuzzyFields = [...fields]; // codes/ids are too short for typo matching
   if (spec.key === "kelas_id") fields.push((i) => i.code || "", (i) => i.id);
 
-  const out: MasterItem[] = [];
-  for (const tokenOrPhrase of [...extraction.tokens, extraction.query]) {
-    for (const item of items) {
-      if (out.includes(item)) continue;
-      const matched = fields.some((fn) => tokenMatchesItem(tokenOrPhrase, fn(item)));
-      if (matched) out.push(item);
+  // Rank each item by its best field/token match, keep only the top tier:
+  // "bahasa inggris" must not also return "Bahasa Indonesia", but equal-tier ties
+  // (two people named "Siti") are all kept.
+  const abbrevOk = spec.key !== "kelas_id" && !spec.match_field;
+  const scored: { item: MasterItem; score: number }[] = [];
+  for (const item of items) {
+    let score = 0;
+    for (const tokenOrPhrase of [...extraction.tokens, extraction.query]) {
+      for (const fn of fields) {
+        score = Math.max(score, matchTier(tokenOrPhrase, fn(item)));
+        if (abbrevOk && tokenOrPhrase !== extraction.query && isAbbreviation(tokenOrPhrase, fn(item))) {
+          score = Math.max(score, 0.5);
+        }
+      }
     }
+    if (score > 0) scored.push({ item, score });
   }
-  return out;
+  if (scored.length === 0) return fuzzyMatchListItems(extraction.tokens, fuzzyFields, items);
+  const best = Math.max(0, ...scored.map((s) => s.score));
+  const top = scored.filter((s) => s.score === best).map((s) => s.item);
+  if (top.length < 2) return top;
+  // Tied on a shared word ("bahasa"): a leftover token no tied item contains exactly
+  // ("inggirs") is a typo, so let fuzzy pick among the tied items.
+  const residual = extraction.tokens.filter((tk) => {
+    const t = norm(tk);
+    return t.length >= 4 && /^[a-z]+$/.test(t) && !top.some((i) => fuzzyFields.some((fn) => closestWordDist(t, fn(i)) === 0));
+  });
+  const narrowed = residual.length > 0 ? fuzzyMatchListItems(residual, fuzzyFields, top) : [];
+  return narrowed.length > 0 ? narrowed : top;
+}
+
+// Last resort when nothing matched exactly: typo tolerance ("matematka", "sitti" vs wali "Siti").
+// Only tokens of 4+ letters, and only the nearest distance is kept (ties all shown).
+function fuzzyMatchListItems(tokens: string[], fields: ((i: MasterItem) => string)[], items: MasterItem[]): MasterItem[] {
+  const scored: { item: MasterItem; dist: number }[] = [];
+  for (const item of items) {
+    let dist = Infinity;
+    for (const token of tokens) {
+      const t = norm(token);
+      if (t.length < 4 || !/^[a-z]+$/.test(t)) continue;
+      for (const fn of fields) {
+        const d = closestWordDist(t, fn(item));
+        if (d <= fuzzyMaxDist(t)) dist = Math.min(dist, d);
+      }
+    }
+    if (dist < Infinity) scored.push({ item, dist });
+  }
+  const best = Math.min(Infinity, ...scored.map((s) => s.dist));
+  return scored.filter((s) => s.dist === best).map((s) => s.item);
 }
 
 // ---------------------------------------------------------------------------

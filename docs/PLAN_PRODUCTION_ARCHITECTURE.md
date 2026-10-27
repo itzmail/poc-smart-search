@@ -3,6 +3,7 @@
 > **Status**: Approved & Implemented Architecture — ✅ **Phase 1–4 SELESAI & TERVERIFIKASI PENUH**  
 > **Verifikasi**: 26 Okt 2026 — `bun run test:e2e` → ✅ **16/16 check PASS** · `tsc --noEmit` → ✅ **0 error** · `bun run test:benchmark` → ✅ **JEV 94% / 272.1 ms, Lokal 94% / 2.92 ms**  
 > **Scope**: `service-search` (Dockerized `4 vCPU / 4 GB RAM` + Redis) & `app-education` (External Host Service)
+> **Lanjutan**: ketahanan, skala, dan keamanan production → [`PLAN_PRODUCTION_HARDENING.md`](./PLAN_PRODUCTION_HARDENING.md)
 
 ---
 

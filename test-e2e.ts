@@ -71,20 +71,28 @@ async function runE2E() {
   const rLunas = await search("riwayat tagihan yang sudah lunas", "SUPERADMIN");
   check("status=lunas (bukan nunggak meski ada kata 'tagihan')", rLunas.options[0]?.data?.filters?.status === "lunas", `-> ${rLunas.options[0]?.destination}`);
 
-  // 5B. Natural-language waktu & status (enum + semantic fallback):
+  // 5B. Natural-language waktu & status (enum + semantic fallback + date range filter):
   console.log(pc.bold("\n5B. Natural Language: waktu relatif & status colloquial"));
   const nlCases = [
-    { q: "Siapa yang belum bayar spp minggu ini?", filter: { status: "nunggak", periode: "minggu_ini" } },
-    { q: "Siapa yang belum bayar spp tahun lalu?", filter: { status: "nunggak", periode: "tahun_lalu" } },
-    { q: "santri yang udah nyetor syahriah", filter: { status: "lunas" } },
-    { q: "santri yang belum nyetor syahriah", filter: { status: "nunggak" } },
-    { q: "kembalian siswa yg sudah kasih duit", filter: { status: "lunas" } },
+    {
+      q: "Siapa yang belum bayar spp minggu ini?",
+      check: (f: any) => f.status === "nunggak" && !!f["created_at.$gte"] && !!f["created_at.$lte"],
+      desc: 'status="nunggak", created_at.$gte & created_at.$lte present',
+    },
+    {
+      q: "Siapa yang belum bayar spp tahun lalu?",
+      check: (f: any) => f.status === "nunggak" && !!f["created_at.$gte"] && !!f["created_at.$lte"],
+      desc: 'status="nunggak", created_at.$gte & created_at.$lte present',
+    },
+    { q: "santri yang udah nyetor syahriah", check: (f: any) => f.status === "lunas", desc: 'status="lunas"' },
+    { q: "santri yang belum nyetor syahriah", check: (f: any) => f.status === "nunggak", desc: 'status="nunggak"' },
+    { q: "kembalian siswa yg sudah kasih duit", check: (f: any) => f.status === "lunas", desc: 'status="lunas"' },
   ];
   for (const tc of nlCases) {
     const r = await search(tc.q, "SUPERADMIN");
     const f = r.options[0]?.data?.filters || {};
-    const ok = Object.entries(tc.filter).every(([k, v]) => f[k] === v);
-    check(`"${tc.q}" -> ${JSON.stringify(tc.filter)}`, ok, `got ${JSON.stringify(f)}`);
+    const ok = tc.check(f);
+    check(`"${tc.q}" -> ${tc.desc}`, ok, `got ${JSON.stringify(f)}`);
   }
 
   // 6. Master semantic: 'nilai matematika tahun ajaran ini'
@@ -122,7 +130,7 @@ async function runE2E() {
   // 10. Local fallback (transformers.js in-process)
   console.log(pc.bold("\n10. Local Fallback (transformers.js in-process, engine=local)"));
   const rLocal = await search("Siti ini ada di kelas berapa?", "SUPERADMIN", "1", "local");
-  console.log(pc.dim(`   engine=${rLocal.engine} | route=${rLocal.target_route}`));
+  console.log(pc.dim(`   engine=${rLocal.meta?.engine} | route=${rLocal.target_route}`));
   check("Fallback local tetap menurunkan opsi entity kelas Siti", rLocal.options.some((o: any) => o.destination === "/kelas/K-08B"));
 
   // 11. Cache hit latensi
@@ -132,6 +140,54 @@ async function runE2E() {
   const dur = performance.now() - t1;
   console.log(pc.dim(`   2nd call: ${dur.toFixed(2)}ms`));
   check(dur < 20, "Cache hit < 20ms");
+
+  // 11b. Kata penunjuk siswa: fetch siswa saja, tanpa opsi wali kelas
+  console.log(pc.bold("\n11b. Anchor siswa: 'Anak bernama Siti ada di kelas mana?'"));
+  await fetch(`${SEARCH_URL}/routes/refresh`, { method: "POST", headers: { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" } });
+  const rAnak = await search("Anak bernama Siti ada di kelas mana?", "SUPERADMIN");
+  const anakSiswa = rAnak.options.filter((o: any) => o.data?.entity_role === "siswa");
+  check("Token ter-ekstrak hanya 'siti' -> 2 siswa Siti muncul", anakSiswa.length >= 2 && !!anakSiswa.find((o: any) => o.data.siswa.nama === "Siti Aisyah"));
+  check("Opsi wali kelas TIDAK muncul saat ada kata 'anak'", !rAnak.options.some((o: any) => o.data?.entity_role === "wali_kelas"));
+
+  // 12. Hardening: identitas, batas input, isolasi tenant, rate limit
+  console.log(pc.bold("\n12. Hardening (identitas, batas input, isolasi tenant, rate limit)"));
+  const H1 = { "X-Client-Id": "1", "X-User-Role": "SUPERADMIN" };
+  const get = (qs: string, headers: Record<string, string> = H1) => fetch(`${SEARCH_URL}/resolve?${qs}`, { headers });
+  const qSiti = encodeURIComponent("Siti ini ada di kelas berapa?");
+
+  check("Tanpa header identitas -> 401", (await get(`q=${qSiti}`, {})).status === 401);
+  check("X-Client-Id tidak valid -> 401", (await get(`q=${qSiti}`, { "X-Client-Id": "a:b", "X-User-Role": "GURU" })).status === 401);
+
+  const plain = await (await get(`q=${qSiti}`)).json();
+  const spoofed = await (await get(`q=${qSiti}&client_id=2&role=GURU&engine=local`)).json();
+  check(
+    "client_id/role/engine di query diabaikan (hasil identik dengan tenant 1)",
+    spoofed.target_route === plain.target_route && spoofed.total_options === plain.total_options && spoofed.meta?.engine === plain.meta?.engine
+  );
+
+  const otherTenant = await (await get(`q=${qSiti}`, { "X-Client-Id": "2", "X-User-Role": "SUPERADMIN" })).json();
+  check("Cache tenant 1 tidak dilayani ke tenant 2", otherTenant.meta?.cached === false);
+
+  check("q 201 karakter -> 400", (await get(`q=${"a".repeat(201)}`)).status === 400);
+  const bigBody = await fetch(`${SEARCH_URL}/resolve`, { method: "POST", headers: H1, body: "x".repeat(5000) });
+  check("Body POST > 4 KB -> 413", bigBody.status === 413);
+  check("Body POST JSON rusak -> 400", (await fetch(`${SEARCH_URL}/resolve`, { method: "POST", headers: H1, body: "{bad" })).status === 400);
+
+  for (const t of ["abc", "-5", "999", "Infinity"]) {
+    check(`threshold='${t}' tidak membuat error`, (await get(`q=${qSiti}&threshold=${t}`)).status === 200);
+  }
+
+  if (process.env.RATE_LIMIT_RPM === "0") {
+    console.log(pc.dim("   (skip rate limit: RATE_LIMIT_RPM=0)"));
+  } else {
+    const rlHeaders = { "X-Client-Id": "rl-test", "X-User-Role": "GURU" };
+    let limited: Response | undefined;
+    for (let i = 0; i < 400 && !limited; i++) {
+      const r = await get(`q=${qSiti}`, rlHeaders);
+      if (r.status === 429) limited = r;
+    }
+    check("Rate limit -> 429 dengan Retry-After", !!limited && Number(limited.headers.get("Retry-After")) >= 1);
+  }
 
   // Rangkuman
   if (failures === 0) {

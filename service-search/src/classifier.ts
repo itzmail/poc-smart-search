@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { classifyLocal, type LocalCandidate } from "./local-model.js";
+import { jevBreaker } from "./breaker.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -126,6 +127,7 @@ async function classifyWithJev(
       state: query,
       questions,
     }),
+    signal: AbortSignal.timeout(parseInt(process.env.JEV_TIMEOUT_MS || "1500", 10)),
   });
 
   if (!res.ok) throw new Error(`JEV request failed with HTTP ${res.status}`);
@@ -170,10 +172,13 @@ export async function classifyIntent(
   }
 
   // Mode Auto: Coba JEV Cloud dulu, jika tidak ada key atau gagal, fallback ke Local Laya
-  if (apiKey) {
+  if (apiKey && jevBreaker.allow()) {
     try {
-      return await classifyWithJev(query, apiKey, routes);
+      const result = await classifyWithJev(query, apiKey, routes);
+      jevBreaker.success();
+      return result;
     } catch {
+      jevBreaker.failure();
       // Fallback ke transformers.js in-process (pengganti daemon Python Laya)
       return await classifyWithLocal(query, routes);
     }

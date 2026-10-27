@@ -401,6 +401,32 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // 2a. Data Guru Module (q = LIKE on name, mapel = exact subject)
+  if (pathname === "/api/guru" || pathname === "/guru") {
+    const search = qParams.get("q");
+    const mapel = qParams.get("mapel");
+
+    let sql = "SELECT id, nama, mapel, wali_kelas_id, client_id FROM guru WHERE client_id = ?";
+    const params: string[] = [clientId];
+    if (search) {
+      sql += " AND LOWER(nama) LIKE LOWER(?)";
+      params.push(`%${search}%`);
+    }
+    if (mapel) {
+      sql += " AND LOWER(mapel) = LOWER(?)";
+      params.push(mapel);
+    }
+
+    const rows = db.query(sql).all(...params);
+    return sendJson(res, 200, {
+      module: "Master Data Guru",
+      client_id: clientId,
+      filters_applied: { search, mapel },
+      count: rows.length,
+      data: rows,
+    });
+  }
+
   // 2b. Detail Siswa by ID
   if (pathname.startsWith("/api/siswa/") || pathname.startsWith("/siswa/")) {
     const id = pathname.replace(/^\/(api\/)?siswa\//, "");
@@ -430,6 +456,8 @@ const server = http.createServer(async (req, res) => {
     const kelasId = qParams.get("kelas_id");
     const periode = qParams.get("periode"); // hari_ini | minggu_ini | bulan_ini | bulan_lalu | tahun_ini | tahun_lalu
     const academicYearId = qParams.get("academic_year_id");
+    const createdAtGte = qParams.get("created_at.$gte") || qParams.get("created_at[gte]");
+    const createdAtLte = qParams.get("created_at.$lte") || qParams.get("created_at[lte]");
 
     let sql = "SELECT id, siswa_id, nama_siswa, kelas, academic_year_id, bulan, nominal, status, jatuh_tempo, client_id FROM spp WHERE client_id = ?";
     const params: string[] = [clientId];
@@ -444,19 +472,31 @@ const server = http.createServer(async (req, res) => {
       params.push(academicYearId);
     }
 
-    // Filter waktu relatif dihitung server-side (TIDAK ditebak oleh AI)
-    if (periode === "hari_ini") {
-      sql += " AND date(jatuh_tempo) = date('now', 'localtime')";
-    } else if (periode === "minggu_ini") {
-      sql += " AND date(jatuh_tempo) BETWEEN date('now', 'localtime', '-7 days') AND date('now', 'localtime')";
-    } else if (periode === "bulan_ini") {
-      sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime')";
-    } else if (periode === "bulan_lalu") {
-      sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime', '-1 month')";
-    } else if (periode === "tahun_ini") {
-      sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime')";
-    } else if (periode === "tahun_lalu") {
-      sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime', '-1 year')";
+    // Filter tanggal absolut (created_at.$gte & created_at.$lte)
+    if (createdAtGte) {
+      sql += " AND date(jatuh_tempo) >= date(?)";
+      params.push(createdAtGte);
+    }
+    if (createdAtLte) {
+      sql += " AND date(jatuh_tempo) <= date(?)";
+      params.push(createdAtLte);
+    }
+
+    // Fallback filter waktu relatif (legacy / enum periode)
+    if (!createdAtGte && !createdAtLte) {
+      if (periode === "hari_ini") {
+        sql += " AND date(jatuh_tempo) = date('now', 'localtime')";
+      } else if (periode === "minggu_ini") {
+        sql += " AND date(jatuh_tempo) BETWEEN date('now', 'localtime', '-7 days') AND date('now', 'localtime')";
+      } else if (periode === "bulan_ini") {
+        sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime')";
+      } else if (periode === "bulan_lalu") {
+        sql += " AND strftime('%Y-%m', jatuh_tempo) = strftime('%Y-%m', 'now', 'localtime', '-1 month')";
+      } else if (periode === "tahun_ini") {
+        sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime')";
+      } else if (periode === "tahun_lalu") {
+        sql += " AND strftime('%Y', jatuh_tempo) = strftime('%Y', 'now', 'localtime', '-1 year')";
+      }
     }
 
     if (kelasId) {
@@ -482,6 +522,8 @@ const server = http.createServer(async (req, res) => {
         kelas: kelasId || kelas,
         periode: periode || null,
         academic_year_id: academicYearId || null,
+        "created_at.$gte": createdAtGte || null,
+        "created_at.$lte": createdAtLte || null,
       },
       active_context: getActiveContext(clientId),
       total_tunggakan: totalTunggakan,

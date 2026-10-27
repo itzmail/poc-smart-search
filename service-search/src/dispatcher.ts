@@ -2,6 +2,7 @@ import type { ClassificationResult, IntentType } from "./classifier.js";
 import type { RawExtraction } from "./extractor.js";
 import type { AppRoute, ParamSpec } from "./routes-sync.js";
 import { indexResolvedParams, type ResolvedParam } from "./lazy-resolver.js";
+import { resolveDateRange } from "./date-range.js";
 
 export type TargetType = "DETAIL" | "LIST" | "ACTION";
 
@@ -18,20 +19,20 @@ export interface SearchOption {
   data?: Record<string, any>;
 }
 
-export interface SmartSearchResponse {
-  status: "success";
-  query: string;
-  client_id?: string;
-  user_role?: string;
+export interface SmartSearchMeta {
   engine: "JEV_CLOUD" | "LOCAL_TRANSFORMERS";
   latency_ms: number;
   cached?: boolean;
-  threshold: number;
+  degraded?: boolean;
+}
+
+export interface SmartSearchResponse {
+  status: "success";
+  query: string;
   target_route?: string;
-  allowed_params?: ParamSpec[];
-  resolved_params?: Record<string, any[]>;
   total_options: number;
   options: SearchOption[];
+  meta: SmartSearchMeta;
 }
 
 const r2 = (n: number) => Math.min(1, Math.round(n * 100) / 100); // clamp 0..1
@@ -51,7 +52,8 @@ export function dispatchAction(
   selectedRoute: AppRoute | undefined,
   dynamicRoutes: AppRoute[],
   resolved: ResolvedParam[],
-  threshold: number = 0.2
+  threshold: number = 0.2,
+  referenceDateStr?: string
 ): SmartSearchResponse {
   const { probabilities, engine, latency_ms } = classification;
   const qLower = query.toLowerCase();
@@ -145,20 +147,76 @@ export function dispatchAction(
       }
     }
 
+    // 1E. Route "guru": one DETAIL option per matched teacher, plain LIST when nothing matched
+    if (route.id === "guru") {
+      const guruResolved = params["guru_id"];
+      for (const g of (guruResolved?.values || []).slice(0, 8)) {
+        options.push({
+          rank: options.length + 1,
+          score: r2(directProb),
+          intent: "DIRECT_LINK",
+          target_type: "DETAIL",
+          title: `Profil Guru: ${g.name}`,
+          description: `${g.name}${g.raw?.mapel ? ` — ${g.raw.mapel}` : ""}`,
+          destination: `/guru/${g.id}`,
+          data: {
+            entity_role: "guru",
+            guru: { id: g.id, nama: g.name, mapel: g.raw?.mapel, wali_kelas_id: g.raw?.wali_kelas_id },
+          },
+        });
+      }
+      if (options.length === 0) {
+        options.push({
+          rank: 1,
+          score: r2(directProb),
+          intent: "DIRECT_LINK",
+          target_type: "LIST",
+          title: route.title,
+          description: route.description,
+          destination: route.path,
+          data: { route: route.id },
+        });
+      }
+    }
+
     // 1C. SPP/nilai/rapot: LIST route dengan query params dari resolved values
     const isListRoute = ["spp", "siswa", "nilai", "dashboard"].includes(route.id) && options.length === 0;
 
     if (isListRoute) {
       const qs = new URLSearchParams();
+      let dateRangeApplied = false;
+      // Transformer guesses on master lists are never applied as filters; offered as "did you mean"
+      const suggestions: { key: string; item: { id: string; name: string } }[] = [];
+
       for (const spec of route.allowed_params || []) {
         // mode search (siswa_id): ditangani terpisah sebagai ?q=<nama depan entitas>
         if (spec.mode === "search") continue;
         const rp = params[spec.key];
         if (!rp) continue;
+        if (rp.source === "semantic" && (spec.mode ?? "list") === "list" && rp.values[0]) {
+          suggestions.push({ key: spec.key, item: rp.values[0] });
+          continue;
+        }
         if (rp.source === "enum" || rp.source === "semantic") {
-          // enum: label dari DB config, langsung dipasang
+          // enum / date_range: label dari DB config
           const v = extraction.enumValues[spec.key];
-          if (v) qs.set(spec.key, v);
+          if (v) {
+            // Jika slot adalah date_range (mis. created_at) atau legacy periode
+            if (spec.mode === "date_range" || spec.key === "periode" || spec.key === "created_at") {
+              const bounds = resolveDateRange(v, referenceDateStr);
+              if (bounds) {
+                const gteKey = spec.param_gte || "created_at.$gte";
+                const lteKey = spec.param_lte || "created_at.$lte";
+                qs.set(gteKey, bounds.gte);
+                qs.set(lteKey, bounds.lte);
+                dateRangeApplied = true;
+              } else {
+                qs.set(spec.key, v);
+              }
+            } else {
+              qs.set(spec.key, v);
+            }
+          }
         } else if (rp.values[0]) {
           // selain enum: pakai id master (FK) — mis. kelas_id=K-08B
           qs.set(spec.key, rp.values[0].id);
@@ -198,10 +256,27 @@ export function dispatchAction(
         },
       });
 
+      for (const sg of suggestions) {
+        const withGuess = new URLSearchParams(qs);
+        withGuess.set(sg.key, sg.item.id);
+        options.push({
+          rank: options.length + 1,
+          score: r2(directProb * 0.9),
+          intent: "DIRECT_LINK",
+          target_type: "LIST",
+          title: `Maksud Anda ${sg.item.name}? — ${route.title}`,
+          description: `Tebakan semantik, belum pasti: buka ${route.title.toLowerCase()} untuk ${sg.item.name}`,
+          destination: `${route.path}?${withGuess.toString()}`,
+          data: { route: route.id, suggestion: true, filters: Object.fromEntries(withGuess.entries()) },
+        });
+      }
+
       // Tambah opsi alternatif tanpa filter waktu, jika user menyebut periode/tahun
-      if (qs.get("academic_year_id") || qs.get("periode")) {
+      if (qs.get("academic_year_id") || qs.get("created_at.$gte") || qs.get("periode")) {
         const alt = new URLSearchParams(qs);
         alt.delete("periode");
+        alt.delete("created_at.$gte");
+        alt.delete("created_at.$lte");
         alt.delete("academic_year_id");
         options.push({
           rank: options.length + 1,
@@ -287,16 +362,14 @@ export function dispatchAction(
   return {
     status: "success",
     query,
-    engine,
-    latency_ms,
-    threshold,
     target_route: route?.id,
-    allowed_params: route?.allowed_params || [],
-    resolved_params: Object.fromEntries(
-      Object.entries(params).map(([k, v]) => [k, v.values.map((val) => ({ id: val.id, name: val.name }))])
-    ),
     total_options: filteredOptions.length,
     options: filteredOptions,
+    meta: {
+      engine,
+      latency_ms,
+      cached: false,
+    },
   };
 }
 

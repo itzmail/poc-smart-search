@@ -130,39 +130,113 @@ export async function classifyLocal(
 // Anchor deskriptif diekstrak langsung dari values DB (membersihkan simbol regex),
 // sehingga tidak ada dictionary hardcode di file TypeScript.
 function anchorTextFromRegex(key: string, regexStr: string): string {
-  // Buang karakter kontrol regex: \b, \s*, (, ), |, ?, +, ^, $
-  const words = regexStr
-    .replace(/\\[bBwWsSdD]/g, " ")
-    .replace(/[^a-zA-Z0-9_\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  // Pisahkan branch OR agar negasi "belum lunas" tidak meninggalkan kata "lunas" terisolasi
+  const rawBranches = regexStr.split("|");
+  const filtered: string[] = [];
+  for (const b of rawBranches) {
+    let clean = b
+      .replace(/\\[bBwWsSdD]/g, " ")
+      .replace(/[^a-zA-Z0-9_\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!clean) continue;
+    if (key === "nunggak" && clean.includes("lunas")) {
+      clean = clean.replace(/\blunas\b/g, "belum lunas");
+    }
+    filtered.push(clean);
+  }
+  const words = filtered.join(" ");
   return words ? `${key.replace(/_/g, " ")}: ${words}` : key.replace(/_/g, " ");
+}
+
+export interface SemanticMatchDetail {
+  matchedKey: string | null;
+  bestScore?: number;
+  margin?: number;
+  scores: Array<{ key: string; score: number }>;
+}
+
+// Passage embeddings keyed by passage text: anchors rarely change, so embed them once.
+const passageVecCache = new Map<string, number[]>();
+
+// Query embedding shared across all enum/date_range specs of one request.
+export async function embedQuery(query: string): Promise<number[] | null> {
+  const vecs = await embed([`query: ${query}`]);
+  return vecs ? vecs[0] : null;
 }
 
 export async function semanticEnumMatch(
   query: string,
-  values: Record<string, string> // valueKey -> regex dari DB
+  values: Record<string, string>, // valueKey -> regex dari DB
+  onDetail?: (detail: SemanticMatchDetail) => void,
+  queryVec?: number[] | null
 ): Promise<string | null> {
   const keys = Object.keys(values);
   if (keys.length === 0) return null;
 
   // Passage dibentuk dinamis dari key + pola di DB, zero-hardcode!
   const passages = keys.map((k) => `passage: ${anchorTextFromRegex(k, values[k] || "")}`);
-  const vecs = await embed([
-    `query: ${query}`,
-    ...passages,
-  ]);
-  if (!vecs) return null;
-  const [qv, ...avv] = vecs;
+  const missing = passages.filter((p) => !passageVecCache.has(p));
+  const toEmbed = [...(queryVec ? [] : [`query: ${query}`]), ...missing];
+  if (toEmbed.length > 0) {
+    const fresh = await embed(toEmbed);
+    if (!fresh) return null;
+    const own = queryVec ? fresh : fresh.slice(1);
+    missing.forEach((p, i) => passageVecCache.set(p, own[i]));
+    if (!queryVec) queryVec = fresh[0];
+  }
+  const qv = queryVec as number[];
+  const avv = passages.map((p) => passageVecCache.get(p) as number[]);
   const scored = keys
     .map((key, i) => ({ key, score: cosine(qv, avv[i]) }))
     .sort((a, b) => b.score - a.score);
   const best = scored[0];
   const second = scored[1];
+  const margin = best && second ? best.score - second.score : best ? best.score : 0;
   // Threshold absolut + katup margin: kalau top-1 & top-2 dikenali nyaris sama kuat,
   // jangan nebak (risiko arah salah periode besar. quantifikasikan threshold 0.65 / margin 0.04).
-  if (best && best.score >= 0.65 && (!second || best.score - second.score >= 0.04)) return best.key;
-  return null;
+  const matchedKey =
+    best && best.score >= 0.65 && (!second || best.score - second.score >= 0.04) ? best.key : null;
+
+  if (onDetail) {
+    onDetail({
+      matchedKey,
+      bestScore: best?.score,
+      margin,
+      scores: scored,
+    });
+  }
+
+  return matchedKey;
 }
 
 const VALUE_SIM_THRESHOLD = 0.45;
+
+// Last-resort semantic match of free tokens against master list names (e.g. "hitung-hitungan" -> Matematika).
+// Strict score + margin gates: wrong guess is worse than no filter. Names embed once (cached).
+const LIST_SEM_MIN = Number(process.env.LIST_SEMANTIC_MIN ?? 0.85);
+const LIST_SEM_MARGIN = Number(process.env.LIST_SEMANTIC_MARGIN ?? 0.04);
+
+export async function semanticListMatch(
+  tokens: string[],
+  items: Array<{ id: string; name: string }>
+): Promise<{ id: string; score: number } | null> {
+  if (tokens.length === 0 || items.length < 2) return null;
+  const passages = items.map((i) => `passage: ${i.name}`);
+  const missing = passages.filter((p) => !passageVecCache.has(p));
+  const fresh = await embed([...missing, ...tokens.map((t) => `query: ${t}`)]);
+  if (!fresh) return null;
+  missing.forEach((p, i) => passageVecCache.set(p, fresh[i]));
+  const qvs = fresh.slice(missing.length);
+
+  let best: { id: string; score: number } | null = null;
+  for (const qv of qvs) {
+    const scored = items
+      .map((it, i) => ({ id: it.id, score: cosine(qv, passageVecCache.get(passages[i]) as number[]) }))
+      .sort((a, b) => b.score - a.score);
+    if (scored[0].score >= LIST_SEM_MIN && scored[0].score - scored[1].score >= LIST_SEM_MARGIN) {
+      if (!best || scored[0].score > best.score) best = scored[0];
+    }
+  }
+  return best;
+}

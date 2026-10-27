@@ -61,7 +61,7 @@ export function printSearchProcess(
   }
 
   console.log(pc.dim("─".repeat(78)));
-  console.log(`🚀 STANDARDIZED OPTIONS (Threshold: ${response.threshold * 100}% | Total: ${response.total_options})`);
+  console.log(`🚀 STANDARDIZED OPTIONS (Total: ${response.total_options})`);
 
   response.options.forEach((opt) => {
     const targetBadge =

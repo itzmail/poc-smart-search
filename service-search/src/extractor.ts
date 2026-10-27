@@ -4,6 +4,7 @@
 // pencocokan ke data master (lazy fetch + Redis) dilakukan di lazy-resolver.
 // ---------------------------------------------------------------------------
 import type { ParamSpec } from "./routes-sync.js";
+import { normalizeQuery } from "./normalize.js";
 
 export interface RawExtraction {
   query: string;                    // kalimat asli (lowercased)
@@ -14,6 +15,7 @@ export interface RawExtraction {
     bulan_ini: boolean;
     tahun_ini: boolean;             // "tahun ini"
     tahun_ajaran_ini: boolean;      // "tahun ajaran ini" / "tahun pelajaran ini"
+    tahun_ajaran_lalu: boolean;     // "tahun ajaran lalu" / "sebelumnya" / "kemarin"
   };
 }
 
@@ -22,9 +24,11 @@ const STOPWORDS = new Set([
   "ini", "itu", "belum", "sudah", "bayar", "bulan", "hari", "tahun", "ajaran", "pelajaran",
   "nunggak", "lunas", "tagihan", "tunggakan", "cetak", "semua", "daftar", "rekap", "total",
   "berapa", "tolong", "tunjukkan", "buka", "data", "status", "siapa", "apakah", "aktif",
+  "untuk", "pada", "dengan", "oleh", "kepada",
   "semester", "kelas", "ruang", "rombel", "tingkat", "ada", "di", "ke", "the", "apa",
-  "wali", "guru", "ibu", "bapak", "murid", "santri", "siswa", "profil", "biodata", "adalah", "bertanya",
+  "wali", "guru", "ibu", "bapak", "murid", "santri", "siswa", "anak", "bernama", "profil", "biodata", "adalah", "bertanya",
   "spp", "syahriah", "kas", "nilai", "rapot", "rapor", "uang", "duit", "riwayat",
+  "atas", "nama", "bu", "pak", "sebelumnya",
   "minggu", "kemarin", "lalu", "sekarang", "berjalan", "udah", "yg", "milik", "punya", "format", "pdf", "excel",
 ]);
 
@@ -34,11 +38,12 @@ function extractTokens(query: string): string[] {
   const tokens: string[] = [];
 
   // 1. Contextual anchors: ambil nama tepat setelah kata penunjuk peran (siswa/murid/anak/dll)
-  const studentPattern = /(?:siswa|student|murid|santri|anak|atas\s+nama|nama)\s+([a-z0-9\s]+?)(?:\s+(?:ada|di|kelas|semester|status|yang|lunas|nunggak|belum|sudah|$))/i;
+  const studentPattern = /(?:siswa|student|murid|santri|anak|atas\s+nama|nama)\s+(?:bernama\s+)?([a-z0-9\s]+?)(?:\s+(?:ada|di|kelas|semester|status|yang|lunas|nunggak|belum|sudah)\b|\s*$)/i;
   const studentMatch = query.match(studentPattern);
   if (studentMatch?.[1]) {
     const candidate = studentMatch[1].trim();
-    if (candidate.length >= 2 && !STOPWORDS.has(candidate.toLowerCase())) {
+    // Reject phrases that contain any stopword ("kelas 7a", "nunggak"): only clean names qualify
+    if (candidate.length >= 2 && !candidate.toLowerCase().split(/\s+/).some((w) => STOPWORDS.has(w))) {
       tokens.push(candidate);
     }
   }
@@ -71,19 +76,38 @@ function extractTokens(query: string): string[] {
   });
 }
 
-export function extractRawParams(query: string, allowedParams: ParamSpec[] = []): RawExtraction {
-  const lower = query.toLowerCase();
+export interface ExtractionAudit {
+  regexMatches: Array<{ param: string; matched_value: string; matched_phrase?: string; rule: string }>;
+  stopwordsFiltered: string[];
+}
+
+export function extractRawParams(
+  query: string,
+  allowedParams: ParamSpec[] = [],
+  audit?: ExtractionAudit
+): RawExtraction {
+  const lower = normalizeQuery(query);
   const enumValues: Record<string, string> = {};
 
-  // mode enum: cek setiap frasa regex (negation-aware: nilai label di DB, bukan hardcode)
+  // mode enum & date_range: cek setiap frasa regex (negation-aware: nilai label di DB, bukan hardcode)
   for (const spec of allowedParams) {
-    if ((spec.mode ?? null) !== "enum" || !spec.values) continue;
+    if (((spec.mode ?? null) !== "enum" && spec.mode !== "date_range") || !spec.values) continue;
     for (const [valueKey, regexStr] of Object.entries(spec.values)) {
       // Guard: regex DB salah format -> skip value ini, jangan crash
       try {
         if (enumValues[spec.key]) continue; // first-match-wins (urutan JSON = prioritas)
-        if (new RegExp(regexStr, "i").test(lower)) {
+        const rx = new RegExp(regexStr, "i");
+        const match = lower.match(rx);
+        if (match) {
           enumValues[spec.key] = valueKey;
+          if (audit) {
+            audit.regexMatches.push({
+              param: spec.key,
+              matched_value: valueKey,
+              matched_phrase: match[0],
+              rule: regexStr,
+            });
+          }
         }
       } catch {
         console.warn(`[extractor] Invalid regex for ${spec.key}=${valueKey}: ${regexStr}`);
@@ -102,11 +126,21 @@ export function extractRawParams(query: string, allowedParams: ParamSpec[] = [])
        /\bth(a)?n\??\s*(ajaran|pelajar\s*an|ajar)\s*(ini|sekarang|saat\s*ini|aktif)\b/i.test(lower)) &&
       // Guard: "tahun ajaran lalu/kemarin" => memang tahun ajaran LAMPAU, bukan context aktif
       !/\b(tahun|th(a)?n\??)\s*(ajaran|pelajar(?:an)|ajar)\s*(lalu|kemarin|sebelumnya)\b/i.test(lower),
+    tahun_ajaran_lalu:
+      !/\b\d{4}\/\d{4}\b/.test(lower) &&
+      /\b(tahun|th(a)?n\??)\s*(ajaran|pelajaran|ajar)\s*(lalu|kemarin|sebelumnya)\b/i.test(lower),
   };
+
+  const parsedTokens = extractTokens(lower);
+  if (audit) {
+    // Cari token yang disaring stopword
+    const allWords = lower.replace(/[^a-z0-9\s]/gi, " ").split(/\s+/).filter(Boolean);
+    audit.stopwordsFiltered = allWords.filter((w) => STOPWORDS.has(w) && !parsedTokens.includes(w));
+  }
 
   return {
     query: lower,
-    tokens: extractTokens(lower),
+    tokens: parsedTokens,
     enumValues,
     timeHints,
   };
