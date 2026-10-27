@@ -12,6 +12,7 @@ interface Case {
   role?: string;
   client?: string;
   route?: string; // expected target_route
+  not_route?: string; // target_route must differ (e.g. route does not exist for the tenant)
   has?: string[]; // each must appear (case-insensitive) in the serialized options
   not_has?: string[]; // none may appear (case-insensitive) in the serialized options
   roles?: string[]; // each entity_role must be present among options
@@ -68,6 +69,8 @@ const CASES: Case[] = [
   { cat: "siswa", q: "nilai budi", route: "nilai", has: ["q=budi"] },
   { cat: "siswa", q: "Sitti ada di kelas berapa?", min_siswa: 1 },
   { cat: "siswa", q: "anak bernama Budy kelas berapa", has: ["budi santoso"] },
+  // Negative: gibberish name must not be fuzzed onto a real student
+  { cat: "siswa", q: "siswa bernama Xqzv", not_has: ["budi", "siti", "rian"] },
   // --- Wali kelas / guru ---
   { cat: "wali", q: "siapa wali kelas 8B", has: ["ahmad fauzi"] },
   { cat: "wali", q: "wali kelas bu Siti Aminah", roles: ["wali_kelas"], has: ["siti aminah"] },
@@ -82,7 +85,8 @@ const CASES: Case[] = [
   // --- Bentrok: name shared by student, class teacher, etc. -> show all ---
   { cat: "bentrok", q: "Siti kelas berapa", min_siswa: 2, roles: ["wali_kelas"] },
   // --- Tenant isolation ---
-  { cat: "tenant", q: "nilai nahwu", client: "2", role: "GURU", route: "nilai", known_fail: "tenant 2 has no nilai route nor master subject" },
+  // Tenant 2 has no nilai route by design: it must not leak tenant 1's route
+  { cat: "tenant", q: "nilai nahwu", client: "2", role: "GURU", not_route: "nilai" },
   { cat: "tenant", q: "siswa nunggak kelas 8B", client: "2", role: "ADMIN", not_roles: ["siswa"] },
 ];
 
@@ -101,6 +105,7 @@ function evaluate(c: Case, r: any): string[] {
   const entityRoles = new Set(options.map((o) => o.data?.entity_role).filter(Boolean));
 
   if (c.route && r.target_route !== c.route) problems.push(`route=${r.target_route}, want ${c.route}`);
+  if (c.not_route && r.target_route === c.not_route) problems.push(`unexpected route ${c.not_route}`);
   for (const h of c.has ?? []) if (!blob.includes(h.toLowerCase())) problems.push(`missing "${h}"`);
   for (const h of c.not_has ?? []) if (blob.includes(h.toLowerCase())) problems.push(`unexpected "${h}"`);
   for (const role of c.roles ?? []) if (!entityRoles.has(role)) problems.push(`missing entity_role ${role}`);
