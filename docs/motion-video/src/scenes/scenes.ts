@@ -1,13 +1,16 @@
+import type React from "react";
 import { secondsFor } from "../config";
+import { Scene0 } from "./trace/Scene0";
+import { Scene1 } from "./trace/Scene1";
 
 // `seconds` overrides the word-count estimate once the real voiceover length is known.
-export type SceneDef = { code: string; title: string; caption: string; words: number; seconds?: number };
+export type SceneDef = { code: string; title: string; caption: string; words: number; seconds?: number; component?: React.FC };
 
 // Caption text is a placeholder; the real text lives in NARASI.md.
 // `words` = narration word count per scene, counted from NARASI.md.
 export const traceScenes: SceneDef[] = [
-  { code: "Scene 0", title: "Kenalan dengan Aktor", caption: "Enam aktor di balik Smart Search.", words: 162 },
-  { code: "Scene 1", title: "Hook", caption: "Satu kalimat jadi link dalam 250 ms.", words: 28 },
+  { code: "Scene 0", title: "Kenalan dengan Aktor", caption: "Enam aktor di balik Smart Search.", words: 162, component: Scene0 },
+  { code: "Scene 1", title: "Hook", caption: "Satu kalimat jadi link dalam 250 ms.", words: 28, component: Scene1 },
   { code: "Scene 2", title: "Pintu Masuk", caption: "Gate: header, batas input, rate limit.", words: 34 },
   { code: "Scene 3", title: "Step 1: Classifier", caption: "Route spp, DIRECT_LINK, 0,95 HIGH.", words: 50 },
   { code: "Scene 4a", title: "Extractor: Rapikan Kalimat", caption: "delapan b / VIII B menjadi 8b.", words: 42 },

@@ -12,7 +12,7 @@ export const SceneSequence: React.FC<{ scenes: SceneDef[] }> = ({ scenes }) => {
     <Series>
       {scenes.map((s, i) => (
         <Series.Sequence key={s.code} durationInFrames={frames[i]}>
-          <SceneCard code={s.code} title={s.title} caption={s.caption} />
+          {s.component ? <s.component /> : <SceneCard code={s.code} title={s.title} caption={s.caption} />}
         </Series.Sequence>
       ))}
     </Series>
