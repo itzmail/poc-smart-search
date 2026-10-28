@@ -6,6 +6,20 @@
 
 ---
 
+## Video Penjelasan
+
+**1. Dari Satu Kalimat ke Link** — jejak nyata satu query melewati Classifier, Extractor, Resolver, dan Dispatcher.
+
+[![Dari Satu Kalimat ke Link](https://img.youtube.com/vi/7RHD1GbpkEY/maxresdefault.jpg)](https://youtu.be/7RHD1GbpkEY)
+
+**2. Pengamanan** — auth, batas input, rate limit, degradasi, dan ACL, lengkap dengan status teruji atau belum.
+
+[![Pengamanan](https://img.youtube.com/vi/_7TZjwI2_XE/maxresdefault.jpg)](https://youtu.be/_7TZjwI2_XE)
+
+Sumber video (Remotion) ada di [`docs/motion-video/`](docs/motion-video/).
+
+---
+
 ## Konsep
 
 Pengguna akhir tidak ingin tahu nama route, nama kolom, atau format query SQL. Mereka menulis seperti biasa:
