@@ -1,6 +1,6 @@
 # Production Hardening Plan: Smart Search (Ketahanan, Skala, Keamanan)
 
-> **Status**: Draft untuk review — belum ada perubahan kode.
+> **Status**: W1 + W2 sudah diimplementasi (lihat §9); W3–W7 belum dikerjakan.
 > **Tanggal audit**: 27 Okt 2026
 > **Scope**: `service-search` (+ ketergantungannya ke `app-education`, Redis, JEV Cloud)
 > **Dokumen terkait**: [`PLAN_PRODUCTION_ARCHITECTURE.md`](./PLAN_PRODUCTION_ARCHITECTURE.md) (topologi Docker `4 vCPU / 4 GB`, skema `search_routes`, fase implementasi). Dokumen ini melengkapinya dengan sisi ketahanan, skala, dan keamanan.
@@ -181,3 +181,37 @@ SLO (p95, error rate, RPS) **ditetapkan pemilik produk** — lihat §7.
 - [ ] Redis `maxmemory` + eviction dikonfigurasi
 - [ ] Image Docker dipin, secret via secret manager, `.env` tidak ikut commit
 - [ ] DB `app-education` memakai DB nyata dengan index
+
+---
+
+## 9. Status Implementasi (update 28 Okt 2026)
+
+### Sudah dikerjakan
+
+| Temuan | Status | Catatan |
+|---|---|---|
+| C1 identitas dipalsukan | ✅ (mode `trusted-header`) | `auth.ts`; header wajib → `401`; `client_id`/`role` di query/body diabaikan. JWT masih stub. |
+| C2 `engine` dari klien | ✅ | Hanya dari env `SMARTSEARCH_ENGINE`. |
+| C3 JEV tanpa timeout | ✅ | `JEV_TIMEOUT_MS` (1500) → fallback lokal. |
+| C4 degraded di-cache 30 mnt | ✅ | `meta.degraded=true`, TTL `SMARTSEARCH_DEGRADED_TTL` (20 dtk). |
+| C5 manifest fallback di-cache penuh | ✅ | TTL pendek untuk manifest degraded. |
+| C6 batas input/CORS/rate limit | ✅ sebagian | Body 4 KB, `q` 200, `threshold` clamp, CORS allowlist, rate limit **in-process**. |
+| W6/W7 sebagian | ✅ | `latency_ms` cache hit terukur; `500` generik + `request_id`. |
+| W1 (stale master) | ✅ sebagian | Salinan `:stale` + circuit breaker (`breaker.ts`); lock terdistribusi **belum**. |
+
+Keputusan yang sudah diambil: saat degraded → hasil tanpa filter + `meta.degraded=true` dengan TTL cache pendek (menjawab §7 no. 6).
+
+### Belum dikerjakan / terbuka
+
+- Auth final (JWT/gateway) — §7 no. 3 belum diputuskan.
+- Rate limit berbasis Redis dan lock terdistribusi Redis (butuh keputusan topologi Redis).
+- W3 (konkurensi classifier), W4 (batas cache memori), W5 (zona waktu), W6 (observability, `/ready`, masking PII), W7 (graceful drain, validasi regex DB).
+- Load test k6 (§5) dan SLO (§7 no. 1–2).
+
+### Penilaian kesiapan produksi
+
+Lebih kuat dari audit awal, tetapi belum siap prod penuh. Risiko utama yang tersisa: (1) `trusted-header` hanya aman di balik gateway internal; (2) rate limit dan single-flight tidak dibagi antar-instance; (3) kapasitas belum terukur; (4) `test-e2e.ts` dan `test-extractor.ts` belum dijalankan ulang setelah perubahan terakhir. Urutan berikut: putuskan sumber auth → jalankan ulang tes e2e/extractor → load test sederhana.
+
+### Verifikasi
+
+`test-queries.ts` 47/48 (1 `known_fail`), `test-dispatcher.ts` 8/8. Kasus uji W1/W2 pada `test-e2e.ts` (header kosong → 401, `q` 201 karakter, simulasi upstream mati) perlu dijalankan ulang untuk konfirmasi.

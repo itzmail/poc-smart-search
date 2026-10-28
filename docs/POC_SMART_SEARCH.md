@@ -1120,6 +1120,8 @@ Pada iterasi ini, kelemahan desain sebelumnya (ketergantungan daemon Python Laya
 
 ## 21. Status Implementasi & Verifikasi (25 Okt 2026)
 
+> 📌 Snapshot historis. Status terkini (hardening, resolusi parameter dinamis, hasil tes) ada di **§22**.
+
 ### Komponen
 
 | Komponen | File | Status |
@@ -1148,6 +1150,51 @@ tsc --noEmit             → ❌ 23 error (ParamSpec belum ada, dsb)
 E2E yang **sudah hijau**: health check kedua service, ACL role `GURU` (tidak bisa akses `/spp`), isolasi multi-tenant (tenant 2 route terpisah), threshold dinamis, cache hit < 20 ms.
 
 E2E yang **gagal**: ParamSpec dari DB, disambiguasi 2 siswa "Siti", opsi wali kelas, payload entitas, `status=nunggak`/`lunas`, 5 kasus bahasa alami, `subject_id` + `academic_year_id` pada route `nilai`, fallback lokal entity kelas.
+
+---
+
+## 22. Penyesuaian Hardening & Resolusi Parameter Dinamis (27–28 Okt 2026) ✅
+
+### 22.1 Hardening W1 + W2 (`service-search`)
+
+| Area | Perubahan |
+|---|---|
+| Identitas | `auth.ts`: `AUTH_MODE=trusted-header` (default), header `X-Client-Id`/`X-User-Role` wajib → `401` bila kosong. Tidak ada default `1`/`SUPERADMIN`. `client_id`/`role`/`engine` dari query/body diabaikan; engine hanya dari `SMARTSEARCH_ENGINE`. Mode `jwt` masih stub. |
+| Batas input | Body maks 4 KB (`413`), `q` maks 200 karakter (`400`), `threshold` di-clamp 0–1. Rate limit in-process (`RATE_LIMIT_RPM`), CORS allowlist (`CORS_ORIGINS`), `500` generik + `request_id`. |
+| Upstream | Timeout JEV (`JEV_TIMEOUT_MS`) → fallback lokal; `breaker.ts` circuit breaker. |
+| Degraded | Resolver/manifest menandai `degraded`; respons `meta.degraded=true`, hasil tanpa filter, cache TTL pendek (`SMARTSEARCH_DEGRADED_TTL`, 20 dtk). Master list punya salinan `:stale` (stale-while-error). `latency_ms` cache hit kini terukur. |
+
+### 22.2 Resolusi parameter dinamis
+
+- Param `list`/`search` (kelas, mapel, siswa, guru, wali) dicocokkan ke master tenant lewat `matchListItems`: exact/kata utuh/substring/singkatan → fuzzy (Levenshtein, `FUZZY_MAX_DIST`) → semantik E5 (`LIST_SEMANTIC_MIN` 0,85, margin 0,04).
+- `hint_regex` tidak lagi menjadi gerbang untuk mode `list`; kasus negatif menjaga agar transformer tidak mengarang periode/status.
+- Hasil semantik **tidak pernah jadi filter**: dispatcher menampilkannya sebagai opsi saran **"Maksud Anda X?"** (`data.suggestion=true`, skor `directProb×0,9`) di bawah opsi utama.
+- Nama bentrok → semua kandidat tampil sebagai opsi terpisah. Route baru `guru` (`/api/guru`). Tenant 2 sengaja tanpa route `nilai`.
+
+### 22.3 Hasil pengujian
+
+| Tes | Hasil |
+|---|---|
+| `test-queries.ts` (48 kasus, server berjalan) | 47 lulus, 1 `known_fail`, 0 ✘ |
+| `test-dispatcher.ts` (unit, tanpa server) | 8/8 lulus |
+
+Per kategori: kelas 7/7, mapel 5/6, typo 6/6, waktu 9/9, siswa 8/8, wali 4/4, guru 5/5, bentrok 1/1, tenant 2/2.
+
+**Keterbatasan yang diketahui**
+- `nilai pelajaran ilmu hitung` (→ Matematika) gagal: skor E5 untuk satu kata terlalu datar, tidak bisa diperbaiki lewat ambang. Solusi: alias/sinonim di master mapel.
+- `siswa bernama Xqzv` terbukti tidak dipetakan ke siswa nyata, tetapi isi respons (opsi tampil atau kosong) belum diperiksa langsung.
+- `test-e2e.ts` dan `test-extractor.ts` belum dijalankan ulang setelah perubahan ini.
+
+### 22.4 Kesiapan produksi
+
+Lebih kuat dari sebelumnya, tetapi **belum siap prod penuh** (masih POC yang dikeraskan):
+
+1. Auth `trusted-header` hanya aman di balik gateway internal; JWT belum ada dan sumber auth final belum diputuskan.
+2. Rate limit in-process (tidak dibagi antar-instance); belum ada lock terdistribusi Redis (risiko thundering herd).
+3. Belum ada load test; kapasitas dan bottleneck inferensi lokal belum terukur.
+4. W3–W7 (konkurensi classifier, batas cache, zona waktu, observability, operasional) ditunda.
+
+Rincian: [`PLAN_PRODUCTION_HARDENING.md`](./PLAN_PRODUCTION_HARDENING.md) §9.
 
 ---
 

@@ -214,7 +214,22 @@ Tiga mode `allowed_params`:
 
 Field `ParamSpec` lain: `query_param`, `match_field`, `resolves_to`, `hint_regex`, `values`.
 
-> `hint_regex` adalah **trigger detection** — agar sistem tidak waste HTTP call untuk slot yang tidak relevan dengan kalimat user.
+> `hint_regex` adalah **trigger detection** — agar sistem tidak waste HTTP call untuk slot yang tidak relevan dengan kalimat user. Untuk mode `list`, `hint_regex` tidak lagi menjadi gerbang: master dicocokkan langsung agar sinonim dan typo tetap tertangkap.
+
+### Resolusi Parameter Dinamis (`list` / `search`)
+
+Parameter (kelas, mapel, siswa, guru, wali kelas) dicocokkan ke master tenant, bukan ke kamus statis. Urutan pencocokan `matchListItems`:
+
+| Tingkat | Contoh | Diterapkan sebagai filter? |
+|---|---|---|
+| Exact / kata utuh / substring / singkatan | `8B`, `mtk`, `b indo` | Ya |
+| Fuzzy (Levenshtein, `FUZZY_MAX_DIST`, default 2) | `matematka`, `inggirs`, `Aminha` | Ya |
+| Semantik (E5, ambang `LIST_SEMANTIC_MIN` 0,85, margin 0,04) | `ilmu hitung` | **Tidak** — hanya jadi saran |
+
+- Hasil semantik tidak pernah menjadi filter. Dispatcher menampilkannya sebagai opsi terpisah **"Maksud Anda X?"** (`data.suggestion=true`, skor di bawah opsi utama); opsi utama tetap membawa filter lain yang sudah pasti (mis. `kelas_id`).
+- Bila nama bentrok (mis. "Siti" = 2 siswa + 1 wali kelas), semua kandidat ditampilkan sebagai opsi terpisah.
+- Teks acak (`Xqzv`, `xqzvwk`) tidak dipaksa menjadi siswa/mapel/kelas.
+- Route `guru` (`/api/guru`) tersedia untuk tenant 1 dan 2; tenant 2 sengaja **tanpa** route `nilai`.
 
 ---
 
@@ -229,11 +244,27 @@ Header yang meneruskan antar service:
 
 | Header | Fungsi |
 |---|---|
-| `X-Client-Id` | Isolasi tenant (wajib) |
-| `X-User-Role` | Filter ACL per role |
+| `X-Client-Id` | Isolasi tenant (**wajib**, tanpa default) |
+| `X-User-Role` | Filter ACL per role (**wajib**, tanpa default) |
 | `Authorization` | Terus diteruskan ke app-education |
 
 Cache di-isolasi per tenant **dan** per role — user dengan role berbeda tidak pernah melihat cache satu sama lain.
+
+### Hardening (W1 + W2)
+
+| Area | Perilaku |
+|---|---|
+| Identitas | `AUTH_MODE=trusted-header` (default): identitas hanya dari header; header kosong → `401`. `client_id`/`role`/`engine` di query/body **diabaikan**. Mode `jwt` masih stub. |
+| Asumsi keamanan | Mode `trusted-header` hanya aman bila service hanya terjangkau lewat gateway internal tepercaya. |
+| Batas input | Body maks 4 KB (`413`), `q` maks 200 karakter (`400`), `threshold` di-clamp 0–1. |
+| Rate limit | In-process per `clientId:IP`, `RATE_LIMIT_RPM` (default 120) → `429` + `Retry-After`. |
+| CORS | Allowlist via `CORS_ORIGINS` (kosong = tanpa header CORS). |
+| Error | `500` generik `{error, request_id}`; detail hanya di log. |
+| Upstream | Timeout JEV (`JEV_TIMEOUT_MS`, default 1500) → fallback lokal; circuit breaker untuk upstream. |
+| Degraded | Master/manifest gagal → hasil tanpa filter + `meta.degraded=true`, di-cache singkat (`SMARTSEARCH_DEGRADED_TTL`, default 20 dtk). |
+| Stale-while-error | Master list menyimpan salinan `:stale`; dipakai bila `app-education` gagal. |
+
+Detail audit dan sisa pekerjaan: [`docs/PLAN_PRODUCTION_HARDENING.md`](docs/PLAN_PRODUCTION_HARDENING.md).
 
 ---
 
@@ -246,7 +277,9 @@ Cache di-isolasi per tenant **dan** per role — user dengan role berbeda tidak 
 | `smartsearch:lookup:<client>:<param_key>:<token>` | Hasil pencarian entitas | 30m |
 | `smartsearch:q:v3:<client>:<role>:<engine>:<threshold>:<query>` | Hasil query final | 30m |
 
-Fallback otomatis ke in-memory map bila Redis offline (`cache/redis.ts`). TTL master bisa diubah lewat `SMARTSEARCH_MASTER_TTL`.
+| `smartsearch:master:<client>:<param_key>:stale` | Salinan stale master list (stale-while-error) | 24 jam |
+
+Fallback otomatis ke in-memory map bila Redis offline (`cache/redis.ts`). TTL master bisa diubah lewat `SMARTSEARCH_MASTER_TTL`. Hasil `degraded` memakai TTL pendek (`SMARTSEARCH_DEGRADED_TTL`).
 
 ---
 
@@ -265,6 +298,10 @@ poc-smart-search/
 │   │   ├── server.ts               # HTTP server, pipeline orchestrator
 │   │   ├── classifier.ts           # JEV Cloud + fallback lokal
 │   │   ├── local-model.ts          # transformers.js in-process (ONNX q8)
+│   │   ├── auth.ts                 # Identitas (trusted-header / jwt stub)
+│   │   ├── rate-limit.ts           # Rate limit in-process
+│   │   ├── breaker.ts              # Circuit breaker upstream
+│   │   ├── normalize.ts            # Normalisasi teks untuk matching
 │   │   ├── routes-sync.ts          # Manifest route per (client, role)
 │   │   ├── extractor.ts            # Regex + time-hint extraction
 │   │   ├── lazy-resolver.ts        # Lazy master resolve (list/search/enum)
@@ -285,6 +322,9 @@ poc-smart-search/
 │   └── package.json
 ├── research/                       # Probe skrip riset (JEV contract, routing gap)
 ├── test-e2e.ts                     # Integration test end-to-end
+├── test-queries.ts                 # Suite 48 kasus query (butuh server berjalan)
+├── test-dispatcher.ts              # Unit test dispatcher (tanpa server)
+├── test-extractor.ts               # Test ekstraktor
 ├── run-test.ts                     # Auto start kedua service + jalankan test
 ├── docker-compose.yml              # Stack production: service-search + redis
 └── package.json
@@ -353,6 +393,14 @@ Environment:
 | `HF_ALLOW_REMOTE` | `false` (image) | Matikan download model saat runtime |
 | `SMARTSEARCH_MASTER_TTL` | `1800` | TTL cache master (detik) |
 | `SMARTSEARCH_WARMUP` | — | Prefetch manifest, mis. `1:SUPERADMIN` |
+| `SMARTSEARCH_ENGINE` | `auto` | Engine klasifikasi (`auto`/`jev`/`local`); hanya dari env, bukan request |
+| `SMARTSEARCH_DEGRADED_TTL` | `20` | TTL cache hasil/manifest terdegradasi (detik) |
+| `AUTH_MODE` | `trusted-header` | Sumber identitas (`jwt` masih stub) |
+| `CORS_ORIGINS` | — | Daftar origin diizinkan, dipisah koma |
+| `RATE_LIMIT_RPM` | `120` | Batas request per menit per `clientId:IP` |
+| `JEV_TIMEOUT_MS` | `1500` | Timeout panggilan JEV sebelum fallback lokal |
+| `FUZZY_MAX_DIST` | `2` | Jarak Levenshtein maksimum untuk fuzzy match |
+| `LIST_SEMANTIC_MIN` / `LIST_SEMANTIC_MARGIN` | `0.85` / `0.04` | Ambang dan margin saran semantik |
 
 ---
 
@@ -380,6 +428,17 @@ Environment:
 🎉 SEMUA CHECK SEQUENTIAL LAZY PIPELINE LULUS!
 ```
 
+Suite query tambahan (butuh kedua service berjalan):
+
+```bash
+bun run test-queries.ts      # 48 kasus: 47 lulus, 1 known_fail ("ilmu hitung")
+bun run test-dispatcher.ts   # 8/8 lulus, tanpa server
+```
+
+Ringkasan per kategori `test-queries.ts`: kelas 7/7, mapel 5/6, typo 6/6, waktu 9/9, siswa 8/8, wali 4/4, guru 5/5, bentrok 1/1, tenant 2/2.
+
+> ⚠️ Angka E2E 16/16 di atas diambil sebelum hardening W1–W2 dan perubahan resolusi parameter; **belum dijalankan ulang** setelahnya.
+
 Ringkasan Status Implementasi:
 
 | Komponen / Fungsionalitas | Status | Catatan Teknis |
@@ -404,6 +463,7 @@ Ringkasan Status Implementasi:
 | [`docs/POC_SMART_SEARCH.md`](docs/POC_SMART_SEARCH.md) | Dokumen teknis lengkap: arsitektur, benchmark, tracing, 20+ section |
 | [`docs/PLAN_PRODUCTION_ARCHITECTURE.md`](docs/PLAN_PRODUCTION_ARCHITECTURE.md) | Prinsip arsitektur production, topologi Docker, desain `search_routes`, action plan |
 | [`docs/PLAN_KLASIFIKASI_EKSTRAKSI.md`](docs/PLAN_KLASIFIKASI_EKSTRAKSI.md) | Analisa 14 temuan (F1–F14), pembagian peran AI vs regex, rencana P1–P9 |
+| [`docs/PLAN_PRODUCTION_HARDENING.md`](docs/PLAN_PRODUCTION_HARDENING.md) | Audit ketahanan/skala/keamanan, status W1–W2, penilaian kesiapan prod |
 | [`docs/RESEARCH_API_ACCESS_LAYER.md`](docs/RESEARCH_API_ACCESS_LAYER.md) | Riset call-site layer akses JEV/lokal, biaya token, mode fallback |
 
 ---
