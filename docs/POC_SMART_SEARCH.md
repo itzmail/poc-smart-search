@@ -21,7 +21,7 @@ Sistem ini mendukung arsitektur **Dual-Engine**:
 - **Produksi (Primary)**: **TypeSafe JEV Cloud (`https://api.typesafe.ai/v1/systemone`)** — *Zero-Anchor*, model reasoning semantik terkalibrasi tanpa butuh dataset anchor contoh kalimat.
 - **Lokal / Edge (Fallback / Prototyping)**: **Transformers.js In-Process (`@huggingface/transformers`, ONNX `q8`)** — embedding `Xenova/multilingual-e5-small` via cosine similarity, berjalan **di dalam proses Bun** (tanpa daemon Python, tanpa port tambahan). Model di-*bake* ke Docker image sehingga container bisa jalan **offline** (`HF_ALLOW_REMOTE=false`).
 
-> **Untuk pembaca non-teknis:** alur satu kalimat → link dan pengamanannya dirangkum dalam bahasa sederhana di [Section 23](#23-panduan-alur--pengamanan-versi-baca-).
+> **Untuk pembaca non-teknis:** alur satu kalimat → link dan pengamanannya dirangkum dalam bahasa sederhana di [Section 23](#23-panduan-alur--pengamanan-versi-baca-), dan estimasi biaya JEV per jumlah user di [Section 24](#24-estimasi-biaya-jev--masa-habis-top-up-).
 
 > **Catatan:** daemon Python Laya (`:4141`) telah dipensiunkan dan digantikan oleh `service-search/src/local-model.ts`. Istilah "Laya" masih muncul di beberapa komentar/label lama (`benchmark.ts`, `cli.ts`) — perlu dirapikan.
 
@@ -1276,6 +1276,73 @@ Circuit breaker dan timeout JEV ada di kode (§22.1), tetapi **belum dibuktikan*
 - Peran atau sekolah yang tidak dikenal masih dibalas sukses dengan hasil kosong, belum ditolak. *(Terbaca di kode, belum diperbaiki.)*
 - Di aplikasi contoh (mock), halaman data seperti nilai belum mengecek peran. Ini bagian aplikasi tiruan untuk POC. *(Terbaca di kode `app-education/src/server.ts`.)*
 - Butir kesiapan produksi lain ada di [§22.4](#224-kesiapan-produksi).
+
+---
+
+## 24. Estimasi Biaya JEV & Masa Habis Top-up 📋
+
+Bahan pertimbangan untuk lead dan stakeholder: berapa biaya panggilan JEV Cloud bila diakses banyak user, dan berapa lama satu top-up bertahan. Ini **estimasi**, bukan tagihan. Hanya panggilan JEV yang dihitung; transformers.js berjalan lokal tanpa biaya per panggilan.
+
+### 24.1 Data dasar (pemakaian JEV, 28 Okt 2026)
+
+| Besaran | Nilai |
+|---|---|
+| Biaya total | $0,0036 |
+| Jumlah request | 114 |
+| Token input | 86.485 |
+| Token output | 11.769 |
+| **Biaya per request (`c`)** | $0,0036 ÷ 114 = **$0,0000316** |
+| Rata-rata token per request | ≈759 input, ≈103 output |
+| Biaya gabungan per token | $0,0036 ÷ 98.254 = **$0,0366 per 1 juta token** |
+
+Harga resmi input dan output JEV belum diketahui. Dengan satu total biaya, dua harga tidak bisa dipisah, sehingga digunakan harga **gabungan**. Bila harga resmi tersedia, ganti `c` dengan `(759 × harga_input) + (103 × harga_output)` (harga per token).
+
+### 24.2 Rumus
+
+```
+Biaya bulanan   = U × Q × D × (1 − h) × c
+Masa habis (bulan) = Saldo ÷ Biaya bulanan
+```
+
+| Simbol | Arti | Nilai yang dipakai |
+|---|---|---|
+| `U` | jumlah user aktif | variabel |
+| `Q` | pencarian per user per hari | variabel (skenario 20 dan 50) |
+| `D` | hari aktif per bulan | 22 |
+| `h` | porsi query yang **tidak** memanggil JEV (cache hasil query, dsb.) | 0 (skenario terburuk) |
+| `c` | biaya per panggilan JEV | $0,0000316 |
+| Saldo | top-up Rp 1.000.000 ≈ $55 | kurs tersirat Rp 18.182/$ |
+
+Top-up Rp 1 juta (≈$55) setara **±1,74 juta panggilan JEV** ($55 ÷ `c`).
+
+### 24.3 Skenario
+
+| User aktif | Pencarian/hari | Panggilan/bulan | Biaya/bulan | Rp 1 juta habis dalam |
+|---|---|---|---|---|
+| 100 | 20 | 44.000 | $1,39 (≈Rp 25 rb) | ≈ 40 bulan |
+| 100 | 50 | 110.000 | $3,47 (≈Rp 63 rb) | ≈ 16 bulan |
+| 1.000 | 20 | 440.000 | $13,9 (≈Rp 253 rb) | ≈ 4 bulan |
+| 1.000 | 50 | 1.100.000 | $34,7 (≈Rp 632 rb) | ≈ 1,6 bulan |
+| 10.000 | 20 | 4.400.000 | $139 (≈Rp 2,5 jt) | ≈ 9 hari kerja |
+| 10.000 | 50 | 11.000.000 | $347 (≈Rp 6,3 jt) | ≈ 3,5 hari kerja |
+
+Contoh hitungan: 100 × 20 × 22 × $0,0000316 = $1,39 per bulan. Kolom Rp memakai kurs Rp 18.182/$.
+
+### 24.4 Kesimpulan
+
+- **Sampai ratusan user**, biaya kecil (kurang dari Rp 100 ribu per bulan) dan satu top-up bertahan lebih dari setahun.
+- **Sekitar seribu user**, biaya mulai terasa (ratusan ribu rupiah per bulan). Di titik ini rasio `h` jadi tuas utama: setiap 10% query yang tidak memanggil JEV memotong biaya 10%. Cache hasil query (Redis) dan routing berjenjang yang melewati JEV bila aturan sudah yakin (lihat [`RESEARCH_API_ACCESS_LAYER.md`](./RESEARCH_API_ACCESS_LAYER.md) §5 dan §8, butir P2) adalah kandidatnya.
+- **Puluhan ribu user** membutuhkan anggaran rutin dan pemantauan pemakaian harian.
+
+### 24.5 Batasan estimasi
+
+- Angka dasar berasal dari **satu hari (114 request)** dan kemungkinan besar trafik tes, bukan perilaku user nyata. Rata-rata token query user bisa berbeda.
+- Total $0,0036 hanya berpresisi dua angka penting, sehingga hasil bergeser sekitar ±1,5%.
+- Rata-rata token hari itu (≈759 input / ≈103 output) lebih besar daripada catatan riset sebelumnya (≈430 / ≈42, lihat `RESEARCH_API_ACCESS_LAYER.md`). Penyebabnya belum diselidiki; dugaan sementara adalah teks kriteria JEV yang bertambah.
+- Belum dipastikan apakah 114 request sama dengan 114 panggilan JEV. Bila sebagian dilayani cache, biaya per panggilan nyata lebih tinggi daripada `c`.
+- `h = 0` adalah batas atas biaya; hit rate cache sebenarnya belum diukur.
+- Nominal top-up (Rp 1 juta ≈ $55) dan kurs **perlu dikonfirmasi** ke pihak yang menyediakan top-up. Bila beda, kalikan hasil dengan rasio nominal baru ÷ $55.
+- Belum termasuk pajak, biaya top-up, atau masa berlaku saldo.
 
 ---
 
