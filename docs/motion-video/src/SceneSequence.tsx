@@ -1,5 +1,5 @@
 import React from "react";
-import { Series } from "remotion";
+import { Audio, Series, staticFile } from "remotion";
 import { SceneCard } from "./components/SceneCard";
 import { FPS } from "./config";
 import { durations, SceneDef } from "./scenes/scenes";
@@ -12,6 +12,7 @@ export const SceneSequence: React.FC<{ scenes: SceneDef[] }> = ({ scenes }) => {
     <Series>
       {scenes.map((s, i) => (
         <Series.Sequence key={s.code} durationInFrames={frames[i]}>
+          {s.audio && <Audio src={staticFile(s.audio)} />}
           {s.component ? <s.component /> : <SceneCard code={s.code} title={s.title} caption={s.caption} />}
         </Series.Sequence>
       ))}
