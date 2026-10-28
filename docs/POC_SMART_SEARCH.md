@@ -21,6 +21,8 @@ Sistem ini mendukung arsitektur **Dual-Engine**:
 - **Produksi (Primary)**: **TypeSafe JEV Cloud (`https://api.typesafe.ai/v1/systemone`)** — *Zero-Anchor*, model reasoning semantik terkalibrasi tanpa butuh dataset anchor contoh kalimat.
 - **Lokal / Edge (Fallback / Prototyping)**: **Transformers.js In-Process (`@huggingface/transformers`, ONNX `q8`)** — embedding `Xenova/multilingual-e5-small` via cosine similarity, berjalan **di dalam proses Bun** (tanpa daemon Python, tanpa port tambahan). Model di-*bake* ke Docker image sehingga container bisa jalan **offline** (`HF_ALLOW_REMOTE=false`).
 
+> **Untuk pembaca non-teknis:** alur satu kalimat → link dan pengamanannya dirangkum dalam bahasa sederhana di [Section 23](#23-panduan-alur--pengamanan-versi-baca-).
+
 > **Catatan:** daemon Python Laya (`:4141`) telah dipensiunkan dan digantikan oleh `service-search/src/local-model.ts`. Istilah "Laya" masih muncul di beberapa komentar/label lama (`benchmark.ts`, `cli.ts`) — perlu dirapikan.
 
 ---
@@ -1195,6 +1197,85 @@ Lebih kuat dari sebelumnya, tetapi **belum siap prod penuh** (masih POC yang dik
 4. W3–W7 (konkurensi classifier, batas cache, zona waktu, observability, operasional) ditunda.
 
 Rincian: [`PLAN_PRODUCTION_HARDENING.md`](./PLAN_PRODUCTION_HARDENING.md) §9.
+
+---
+
+## 23. Panduan Alur & Pengamanan (Versi Baca) ✅
+
+Ringkasan naratif untuk pembaca non-teknis, setara dengan dua video penjelasan: [Dari Satu Kalimat ke Link](https://youtu.be/7RHD1GbpkEY) dan [Pengamanan](https://youtu.be/_7TZjwI2_XE). Angka berasal dari trace nyata (tenant 1, peran `SUPERADMIN`, 28 Okt 2026) dan tes live. Istilah teknis dijelaskan seperlunya; detail kode ada di section lain.
+
+### 23.1 Gambaran singkat
+
+Pengguna mengetik satu kalimat biasa, misalnya *"Siapa yang belum bayar SPP minggu ini untuk kelas 8B"*. Dalam sekitar **250 milidetik** (seperempat detik), sistem mengembalikan link yang siap diklik, lengkap dengan filter kelas, status, dan tanggal yang sudah terisi. Prosesnya empat langkah berurutan: **Classifier → Extractor → Resolver → Dispatcher**, didahului satu pintu masuk.
+
+### 23.2 Enam pemain
+
+| Pemain | Peran dalam bahasa sederhana |
+|---|---|
+| **App Pendidikan** | Aplikasi sekolahnya. Menerima pencarian dari pengguna, meneruskannya, dan menyimpan data sekolah (siswa, kelas). |
+| **service-search** | Otak pencarian. Semua langkah di bawah berjalan di sini. |
+| **JEV Cloud** | Layanan AI di luar. Menjawab satu pertanyaan: kalimat ini mengarah ke halaman mana. |
+| **transformers.js** | Model kecil (multilingual E5 small, ±120 MB) yang berjalan di dalam service-search, tanpa internet. Cadangan bila JEV gagal, sekaligus penolong bila aturan biasa tidak cukup. |
+| **Redis** | Tempat menyimpan jawaban sementara agar data yang sama tidak diminta berulang. |
+| **Tabel `search_routes`** | Di database. Menyimpan daftar halaman, filter yang boleh dipakai, dan pola pencocokan (regex), jadi semuanya bukan hardcode di kode. |
+
+Alurnya: pengguna bertanya ke App, App meneruskan ke service-search, service-search bertanya ke JEV (atau ke transformers.js), lalu mengambil data dari Redis atau App. Hasil akhirnya adalah link.
+
+### 23.3 Perjalanan satu kalimat
+
+**Pintu masuk.** Setiap request wajib membawa dua header: sekolah mana dan apa perannya. Dari sini sistem tahu menu apa yang boleh dilihat. Tanpa header, request langsung ditolak.
+
+**Langkah 1, Classifier: halaman mana yang dimaksud?** Hasilnya halaman SPP dengan keyakinan 95%. Jika JEV gagal atau terlalu lama, transformers.js mengambil alih. Langkah ini paling lama (±245 ms dari total ±250 ms), sedangkan tiga langkah lain masing-masing hanya beberapa milidetik.
+
+**Langkah 2, Extractor: apa saja isi kalimatnya?** Extractor mengambil bahan, bukan menafsirkan.
+1. *Rapikan kalimat.* Huruf kecil semua, penulisan kelas diseragamkan: "kelas delapan B" dan "kelas VIII B" sama-sama menjadi `8b`.
+2. *Nilai yang sudah pasti (regex).* Pola disimpan di database. "Belum bayar" cocok dengan pola `nunggak`, "minggu ini" cocok dengan pola periode `minggu_ini`. Kedua filter ini final tanpa perlu tanya database atau model.
+3. *Bila regex tidak kena,* transformers.js membandingkan makna kalimat dengan tiap pilihan. Pilihan dipakai hanya bila skornya minimal 0,65 **dan** unggul minimal 0,04 dari pilihan kedua. Bila dua pilihan sama kuat, sistem tidak menebak. Lebih baik tanpa filter daripada filter yang salah.
+4. *Potong jadi kandidat.* Sisa kata dipotong jadi potongan kecil (chunk): kata setelah "siswa/murid/anak bernama" dianggap nama siswa, kata setelah "kelas" dianggap kode kelas, kata lain yang berhuruf juga jadi kandidat. Kata umum (stopword) dan frasa yang sudah dipakai regex dibuang. Tersisa satu kandidat, `8b`, yang disebut **token**.
+5. *Jangan menebak.* Extractor sengaja tidak menentukan arti `8b`. Ia menyerahkan tiga hal: filter yang sudah pasti, petunjuk waktu, dan token yang belum jelas.
+
+**Langkah 3, Resolver: apa arti "8b"?** Resolver mencocokkan token ke data sekolah, tetapi sengaja "malas": daftar kecil (kelas) dicek dulu, pencarian besar (siswa) belakangan. Daftar kelas sudah ada di Redis sehingga tidak perlu menghubungi aplikasi sekolah. Hasilnya: `8b` = Kelas 8B, kode `K-08B`, dan ditandai terpakai. Karena tidak ada token tersisa, pencarian siswa dilewati (*token exclusion*). Tanpa ini `8b` ikut dicari ke daftar siswa dan pasti kosong, hanya buang waktu.
+
+**Langkah 4, Dispatcher: rakit link.** Semua filter disusun menjadi alamat halaman SPP. "Minggu ini" diterjemahkan menjadi rentang tanggal (tujuh hari, berakhir hari ini). Hasilnya dua pilihan: yang pertama dengan filter tanggal (skor 1), yang kedua tanpa tanggal sebagai cadangan (skor 0,85).
+
+**Ringkasan waktu:**
+
+| Langkah | Waktu |
+|---|---|
+| Classifier | ±245 ms |
+| Extractor | ±0,2 ms |
+| Resolver | ±2,6 ms |
+| Dispatcher | ±2,4 ms |
+| **Total** | **±250 ms** |
+
+Bila ingin lebih cepat, yang perlu dilihat adalah Classifier (panggilan ke JEV).
+
+### 23.4 Dua kasus khusus
+
+**Nama salah ketik.** Query *"Anak bernama Sity ada di kelas berapa?"*. Resolver mencari siswa `sity` dan hasilnya kosong, karena tidak ada pencocokan mirip-mirip pada tahap ini. Resolver lalu mencoba lagi dengan memotong huruf terakhir menjadi `sit`, dan kali ini menemukan dua siswa (Siti Rahma dan Siti Aisyah). Hasilnya dua pilihan link, ke Kelas 8B dan Kelas 7A. Langkah ini lebih lama (±630 ms) karena harus bertanya ke aplikasi sekolah, tetapi hasil pencariannya disimpan sehingga pencarian berikutnya cepat.
+
+**Kalimat santai yang tidak dikenali regex.** Query *"spp pekan ini yang nunggak"*. Regex mengenali `nunggak`, tetapi tidak mengenal kata "pekan", sehingga transformers.js dipanggil untuk menebak periode. Skor tertinggi 0,864 tampak tinggi, tetapi pilihan kedua hampir sama (selisih hanya 0,007, di bawah syarat 0,04). Tebakan **ditolak**, filter periode dikosongkan, dan link yang keluar hanya `/spp?status=nunggak`. Ini disengaja: lebih baik hasilnya agak luas daripada filternya salah.
+
+> **Catatan jujur:** dari 13 query santai yang diuji, tidak ada satu pun yang lolos lapis semantik (semua selisih di bawah 0,04). Transformers.js di sini berperan sebagai **pagar pengaman**, bukan penyelamat yang berhasil menebak.
+
+### 23.5 Pengamanan
+
+Benang merah: siapa boleh masuk, seberapa banyak boleh masuk, dan apa yang terjadi bila sistem sakit.
+
+| Pertanyaan | Hasil | Status |
+|---|---|---|
+| **Siapa yang masuk?** | Identitas hanya dipercaya dari header. Tanpa header, atau hanya satu header, hasilnya `401`. Client id atau role palsu di alamat (query) diabaikan. | Teruji live |
+| **Seberapa banyak?** | `q` maksimal 200 karakter (201 ditolak `400`). Body maksimal 4 KB (lebih dari itu `413`). Batas 120 request/menit: dari 150 request beruntun, 116 lolos dan 34 ditolak `429`. | Teruji live |
+| **Bila aplikasi sekolah mati?** | Jawaban tetap datang, bukan error. Bertingkat: (1) daftar kelas di Redis kedaluwarsa → pakai salinan lama (disimpan sehari), filter kelas tetap benar; (2) salinan lama juga tidak ada → jawaban tanpa filter kelas dan ditandai `degraded`; (3) daftar halaman hilang → pakai daftar bawaan yang kasar. Tanda `degraded` hanya disimpan 20 detik agar gangguan singkat tidak menempel lama. | Teruji live (aplikasi sekolah dimatikan) |
+| **Siapa boleh lihat apa?** | Tiap sekolah dan peran punya daftar halaman sendiri: `SUPERADMIN` sekolah 1 punya 7 halaman, `GURU` 6 halaman (tanpa SPP). Tes menemukan bug: bila daftar halaman kosong, sistem malah membuka semua halaman. Sudah diperbaiki (commit `ca29f34`): daftar kosong kini berarti nol hasil. | Teruji live |
+
+Circuit breaker dan timeout JEV ada di kode (§22.1), tetapi **belum dibuktikan** lewat tes live sehingga tidak dijadikan klaim di sini.
+
+### 23.6 Yang belum selesai
+
+- Peran atau sekolah yang tidak dikenal masih dibalas sukses dengan hasil kosong, belum ditolak. *(Terbaca di kode, belum diperbaiki.)*
+- Di aplikasi contoh (mock), halaman data seperti nilai belum mengecek peran. Ini bagian aplikasi tiruan untuk POC. *(Terbaca di kode `app-education/src/server.ts`.)*
+- Butir kesiapan produksi lain ada di [§22.4](#224-kesiapan-produksi).
 
 ---
 
