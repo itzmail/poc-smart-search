@@ -162,7 +162,8 @@ export async function getRoutesManifest(
       if (res.ok) {
         appEducationBreaker.success();
         const data = await res.json();
-        if (Array.isArray(data.routes) && data.routes.length > 0) {
+        // Array kosong dari upstream sehat = role/tenant tanpa izin: jangan jatuh ke FALLBACK_ROUTES
+        if (Array.isArray(data.routes)) {
           const manifest: RoutesManifest = {
             routes: data.routes,
             active_context: data.active_context,
