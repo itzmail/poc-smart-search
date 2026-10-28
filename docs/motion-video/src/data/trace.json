@@ -1,0 +1,820 @@
+{
+  "meta": {
+    "captured": "2026-10-28",
+    "tenant": "1",
+    "role": "SUPERADMIN",
+    "note": "q1 & sity = first capture (matches NARASI); b1-b3 = second capture"
+  },
+  "q1": {
+    "status": "success",
+    "query": "siapa yang belum bayar spp minggu ini untuk kelas 8b",
+    "target_route": "spp",
+    "total_options": 2,
+    "options": [
+      {
+        "rank": 1,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP — Status NUNGGAK — Kelas 8B",
+        "description": "Buka pembayaran & tagihan spp dengan filter status nunggak",
+        "destination": "/spp?kelas_id=K-08B&status=nunggak&created_at.%24gte=2026-10-22&created_at.%24lte=2026-10-28",
+        "data": {
+          "route": "spp",
+          "filters": {
+            "kelas_id": "K-08B",
+            "status": "nunggak",
+            "created_at.$gte": "2026-10-22",
+            "created_at.$lte": "2026-10-28"
+          }
+        }
+      },
+      {
+        "rank": 2,
+        "score": 0.85,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP — Semua Periode",
+        "description": "Buka pembayaran & tagihan spp tanpa filter periode/tahun",
+        "destination": "/spp?kelas_id=K-08B&status=nunggak",
+        "data": {
+          "route": "spp",
+          "filters": {
+            "kelas_id": "K-08B",
+            "status": "nunggak"
+          }
+        }
+      }
+    ],
+    "meta": {
+      "engine": "JEV_CLOUD",
+      "latency_ms": 250.09,
+      "cached": false
+    },
+    "trace": {
+      "query": "siapa yang belum bayar spp minggu ini untuk kelas 8b",
+      "client_id": "1",
+      "user_role": "SUPERADMIN",
+      "start_time": 29443.645958,
+      "timings_ms": {
+        "classifier": 244.68,
+        "extractor": 0.21,
+        "resolver": 2.6,
+        "dispatcher": 2.35,
+        "total": 250.09
+      },
+      "step1_classifier": {
+        "engine": "JEV_CLOUD",
+        "latency_ms": 244.66,
+        "target_route": "spp",
+        "intent": "DIRECT_LINK",
+        "confidence_score": 0.95,
+        "confidence_level": "HIGH",
+        "decision_reason": "Matched via semantic classification to route \"spp\""
+      },
+      "step2_extractor": {
+        "tokens_parsed": [
+          "8b"
+        ],
+        "stopwords_removed": [
+          "siapa",
+          "yang",
+          "belum",
+          "bayar",
+          "spp",
+          "minggu",
+          "ini",
+          "untuk",
+          "kelas"
+        ],
+        "time_hints": {
+          "hari_ini": false,
+          "bulan_ini": false,
+          "tahun_ini": false,
+          "tahun_ajaran_ini": false,
+          "tahun_ajaran_lalu": false
+        },
+        "regex_matches": [
+          {
+            "param": "status",
+            "matched_value": "nunggak",
+            "matched_phrase": "belum bayar",
+            "rule": "\\b(nunggak|belum\\s*(bayar|lunas|setor|nyetor)|tertunggak|terlambat\\s*bayar|masih\\s*hutang|manarin)\\b|\\bpiring\\b"
+          },
+          {
+            "param": "periode",
+            "matched_value": "minggu_ini",
+            "matched_phrase": "minggu ini",
+            "rule": "\\b(minggu\\s*(ini|berjalan|sekarang)|7\\s*hari\\s*(terakhir|ini))\\b"
+          }
+        ],
+        "transformers_status": [
+          {
+            "param": "status",
+            "status": "STANDBY",
+            "matched_value": "nunggak"
+          },
+          {
+            "param": "periode",
+            "status": "STANDBY",
+            "matched_value": "minggu_ini"
+          }
+        ],
+        "output_slots": {
+          "status": "nunggak",
+          "periode": "minggu_ini"
+        }
+      },
+      "step3_resolver": {
+        "target_route": "spp",
+        "param_specs_evaluated": [
+          "siswa_id",
+          "kelas_id",
+          "status",
+          "periode",
+          "academic_year_id"
+        ],
+        "redis_operations": [
+          {
+            "key": "smartsearch:master:1:kelas_id",
+            "op": "GET",
+            "status": "HIT"
+          }
+        ],
+        "http_calls": [],
+        "token_exclusion": {
+          "consumed": [
+            "8b",
+            "kelas8b"
+          ],
+          "remaining": [],
+          "skipped_calls": [
+            "siswa_id (0 unassigned tokens left - token exclusion)"
+          ]
+        },
+        "resolved_params": {
+          "kelas_id": [
+            {
+              "id": "K-08B",
+              "name": "Kelas 8B"
+            }
+          ],
+          "status": [],
+          "periode": []
+        }
+      },
+      "step4_dispatcher": {
+        "base_url": "/spp",
+        "final_urls": [
+          "/spp?kelas_id=K-08B&status=nunggak&created_at.%24gte=2026-10-22&created_at.%24lte=2026-10-28",
+          "/spp?kelas_id=K-08B&status=nunggak"
+        ],
+        "total_options": 2,
+        "composite_confidence": 1,
+        "confidence_level": "HIGH"
+      }
+    }
+  },
+  "sity": {
+    "status": "success",
+    "query": "anak bernama sity ada di kelas berapa?",
+    "target_route": "kelas",
+    "total_options": 2,
+    "options": [
+      {
+        "rank": 1,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "DETAIL",
+        "title": "Kelas 8B — Siti Rahma (Siswa)",
+        "description": "Siti Rahma terdaftar sebagai siswa di Kelas 8B",
+        "destination": "/kelas/K-08B",
+        "data": {
+          "entity_role": "siswa",
+          "siswa": {
+            "id": "S002",
+            "nisn": "0081234562",
+            "nama": "Siti Rahma",
+            "kelas": "8B"
+          },
+          "kelas": {
+            "id": "K-08B",
+            "code": "8B",
+            "name": "Kelas 8B"
+          }
+        }
+      },
+      {
+        "rank": 2,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "DETAIL",
+        "title": "Kelas 7A — Siti Aisyah (Siswa)",
+        "description": "Siti Aisyah terdaftar sebagai siswa di Kelas 7A",
+        "destination": "/kelas/K-07A",
+        "data": {
+          "entity_role": "siswa",
+          "siswa": {
+            "id": "S009",
+            "nisn": "0081234569",
+            "nama": "Siti Aisyah",
+            "kelas": "7A"
+          },
+          "kelas": {
+            "id": "K-07A",
+            "code": "7A",
+            "name": "Kelas 7A"
+          }
+        }
+      }
+    ],
+    "meta": {
+      "engine": "JEV_CLOUD",
+      "latency_ms": 929.39,
+      "cached": false
+    },
+    "trace": {
+      "query": "anak bernama sity ada di kelas berapa?",
+      "client_id": "1",
+      "user_role": "SUPERADMIN",
+      "start_time": 14291.880583,
+      "timings_ms": {
+        "classifier": 287.06,
+        "extractor": 1.56,
+        "resolver": 632.43,
+        "dispatcher": 7.89,
+        "total": 929.39
+      },
+      "step1_classifier": {
+        "engine": "JEV_CLOUD",
+        "latency_ms": 286.71,
+        "target_route": "kelas",
+        "intent": "DIRECT_LINK",
+        "confidence_score": 0.95,
+        "confidence_level": "HIGH",
+        "decision_reason": "Matched via semantic classification to route \"kelas\""
+      },
+      "step2_extractor": {
+        "tokens_parsed": [
+          "sity"
+        ],
+        "stopwords_removed": [
+          "anak",
+          "bernama",
+          "ada",
+          "di",
+          "kelas",
+          "berapa"
+        ],
+        "time_hints": {
+          "hari_ini": false,
+          "bulan_ini": false,
+          "tahun_ini": false,
+          "tahun_ajaran_ini": false,
+          "tahun_ajaran_lalu": false
+        },
+        "regex_matches": [],
+        "transformers_status": [],
+        "output_slots": {}
+      },
+      "step3_resolver": {
+        "target_route": "kelas",
+        "param_specs_evaluated": [
+          "siswa_id",
+          "wali_kelas",
+          "kelas_id"
+        ],
+        "redis_operations": [
+          {
+            "key": "smartsearch:master:1:kelas_id",
+            "op": "GET",
+            "status": "HIT"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:sity",
+            "op": "GET",
+            "status": "MISS"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:sity",
+            "op": "SET",
+            "status": "HIT"
+          }
+        ],
+        "http_calls": [
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "sity",
+            "results_count": 0
+          },
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "sit",
+            "results_count": 2
+          }
+        ],
+        "token_exclusion": {
+          "consumed": [],
+          "remaining": [
+            "sity"
+          ],
+          "skipped_calls": [
+            "wali_kelas (hint_regex mismatch)"
+          ]
+        },
+        "resolved_params": {
+          "siswa_id": [
+            {
+              "id": "S002",
+              "name": "Siti Rahma"
+            },
+            {
+              "id": "S009",
+              "name": "Siti Aisyah"
+            }
+          ]
+        }
+      },
+      "step4_dispatcher": {
+        "base_url": "/kelas",
+        "final_urls": [
+          "/kelas/K-08B",
+          "/kelas/K-07A"
+        ],
+        "total_options": 2,
+        "composite_confidence": 1,
+        "confidence_level": "HIGH"
+      }
+    }
+  },
+  "b1": {
+    "status": "success",
+    "query": "spp pekan ini yang nunggak",
+    "target_route": "spp",
+    "total_options": 1,
+    "options": [
+      {
+        "rank": 1,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP — Status NUNGGAK",
+        "description": "Buka pembayaran & tagihan spp dengan filter status nunggak",
+        "destination": "/spp?status=nunggak",
+        "data": {
+          "route": "spp",
+          "filters": {
+            "status": "nunggak"
+          }
+        }
+      }
+    ],
+    "meta": {
+      "engine": "JEV_CLOUD",
+      "latency_ms": 338.68,
+      "cached": false
+    },
+    "trace": {
+      "query": "spp pekan ini yang nunggak",
+      "client_id": "1",
+      "user_role": "SUPERADMIN",
+      "start_time": 21737.655459,
+      "timings_ms": {
+        "classifier": 294.52,
+        "extractor": 0.3,
+        "resolver": 43.49,
+        "dispatcher": 0.03,
+        "total": 338.68
+      },
+      "step1_classifier": {
+        "engine": "JEV_CLOUD",
+        "latency_ms": 294.5,
+        "target_route": "spp",
+        "intent": "DIRECT_LINK",
+        "confidence_score": 0.95,
+        "confidence_level": "HIGH",
+        "decision_reason": "Matched via semantic classification to route \"spp\""
+      },
+      "step2_extractor": {
+        "tokens_parsed": [
+          "pekan"
+        ],
+        "stopwords_removed": [
+          "spp",
+          "ini",
+          "yang",
+          "nunggak"
+        ],
+        "time_hints": {
+          "hari_ini": false,
+          "bulan_ini": false,
+          "tahun_ini": false,
+          "tahun_ajaran_ini": false,
+          "tahun_ajaran_lalu": false
+        },
+        "regex_matches": [
+          {
+            "param": "status",
+            "matched_value": "nunggak",
+            "matched_phrase": "nunggak",
+            "rule": "\\b(nunggak|belum\\s*(bayar|lunas|setor|nyetor)|tertunggak|terlambat\\s*bayar|masih\\s*hutang|manarin)\\b|\\bpiring\\b"
+          }
+        ],
+        "transformers_status": [
+          {
+            "param": "status",
+            "status": "STANDBY",
+            "matched_value": "nunggak"
+          },
+          {
+            "param": "periode",
+            "status": "ENGAGED",
+            "score": 0.8642936151425649,
+            "margin": 0.007342797438617543,
+            "reason": "Below threshold or margin gate"
+          }
+        ],
+        "output_slots": {
+          "status": "nunggak"
+        }
+      },
+      "step3_resolver": {
+        "target_route": "spp",
+        "param_specs_evaluated": [
+          "siswa_id",
+          "kelas_id",
+          "status",
+          "periode",
+          "academic_year_id"
+        ],
+        "redis_operations": [
+          {
+            "key": "smartsearch:master:1:kelas_id",
+            "op": "GET",
+            "status": "HIT"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:pekan",
+            "op": "GET",
+            "status": "MISS"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:pekan",
+            "op": "SET",
+            "status": "HIT"
+          }
+        ],
+        "http_calls": [
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "pekan",
+            "results_count": 0
+          },
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "pek",
+            "results_count": 0
+          }
+        ],
+        "token_exclusion": {
+          "consumed": [],
+          "remaining": [
+            "pekan"
+          ],
+          "skipped_calls": []
+        },
+        "resolved_params": {
+          "status": []
+        }
+      },
+      "step4_dispatcher": {
+        "base_url": "/spp",
+        "final_urls": [
+          "/spp?status=nunggak"
+        ],
+        "total_options": 1,
+        "composite_confidence": 1,
+        "confidence_level": "HIGH"
+      }
+    }
+  },
+  "b2": {
+    "status": "success",
+    "query": "siapa yang belom nyetor spp",
+    "target_route": "spp",
+    "total_options": 1,
+    "options": [
+      {
+        "rank": 1,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP",
+        "description": "Buka pembayaran & tagihan spp",
+        "destination": "/spp",
+        "data": {
+          "route": "spp",
+          "filters": {}
+        }
+      }
+    ],
+    "meta": {
+      "engine": "JEV_CLOUD",
+      "latency_ms": 376.5,
+      "cached": false
+    },
+    "trace": {
+      "query": "siapa yang belom nyetor spp",
+      "client_id": "1",
+      "user_role": "SUPERADMIN",
+      "start_time": 22077.584709,
+      "timings_ms": {
+        "classifier": 344.07,
+        "extractor": 0.93,
+        "resolver": 31.28,
+        "dispatcher": 0.02,
+        "total": 376.5
+      },
+      "step1_classifier": {
+        "engine": "JEV_CLOUD",
+        "latency_ms": 344.06,
+        "target_route": "spp",
+        "intent": "DIRECT_LINK",
+        "confidence_score": 0.95,
+        "confidence_level": "HIGH",
+        "decision_reason": "Matched via semantic classification to route \"spp\""
+      },
+      "step2_extractor": {
+        "tokens_parsed": [
+          "belom",
+          "nyetor"
+        ],
+        "stopwords_removed": [
+          "siapa",
+          "yang",
+          "spp"
+        ],
+        "time_hints": {
+          "hari_ini": false,
+          "bulan_ini": false,
+          "tahun_ini": false,
+          "tahun_ajaran_ini": false,
+          "tahun_ajaran_lalu": false
+        },
+        "regex_matches": [],
+        "transformers_status": [
+          {
+            "param": "periode",
+            "status": "ENGAGED",
+            "score": 0.7826760655570011,
+            "margin": 0.007727886398393835,
+            "reason": "Below threshold or margin gate"
+          },
+          {
+            "param": "status",
+            "status": "ENGAGED",
+            "score": 0.7855891653120777,
+            "margin": 0.0016240195547656544,
+            "reason": "Below threshold or margin gate"
+          }
+        ],
+        "output_slots": {}
+      },
+      "step3_resolver": {
+        "target_route": "spp",
+        "param_specs_evaluated": [
+          "siswa_id",
+          "kelas_id",
+          "status",
+          "periode",
+          "academic_year_id"
+        ],
+        "redis_operations": [
+          {
+            "key": "smartsearch:master:1:kelas_id",
+            "op": "GET",
+            "status": "HIT"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:belom",
+            "op": "GET",
+            "status": "MISS"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:nyetor",
+            "op": "GET",
+            "status": "MISS"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:belom",
+            "op": "SET",
+            "status": "HIT"
+          },
+          {
+            "key": "smartsearch:lookup:1:siswa_id:nyetor",
+            "op": "SET",
+            "status": "HIT"
+          }
+        ],
+        "http_calls": [
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "belom",
+            "results_count": 0
+          },
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "nyetor",
+            "results_count": 0
+          },
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "bel",
+            "results_count": 0
+          },
+          {
+            "endpoint": "/api/siswa",
+            "param": "siswa_id",
+            "query_token": "nye",
+            "results_count": 0
+          }
+        ],
+        "token_exclusion": {
+          "consumed": [],
+          "remaining": [
+            "belom",
+            "nyetor"
+          ],
+          "skipped_calls": []
+        },
+        "resolved_params": {}
+      },
+      "step4_dispatcher": {
+        "base_url": "/spp",
+        "final_urls": [
+          "/spp"
+        ],
+        "total_options": 1,
+        "composite_confidence": 1,
+        "confidence_level": "HIGH"
+      }
+    }
+  },
+  "b3": {
+    "status": "success",
+    "query": "spp nunggak bulan lalu",
+    "target_route": "spp",
+    "total_options": 2,
+    "options": [
+      {
+        "rank": 1,
+        "score": 1,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP — Status NUNGGAK",
+        "description": "Buka pembayaran & tagihan spp dengan filter status nunggak",
+        "destination": "/spp?status=nunggak&created_at.%24gte=2026-09-01&created_at.%24lte=2026-09-30",
+        "data": {
+          "route": "spp",
+          "filters": {
+            "status": "nunggak",
+            "created_at.$gte": "2026-09-01",
+            "created_at.$lte": "2026-09-30"
+          }
+        }
+      },
+      {
+        "rank": 2,
+        "score": 0.85,
+        "intent": "DIRECT_LINK",
+        "target_type": "LIST",
+        "title": "Pembayaran & Tagihan SPP — Semua Periode",
+        "description": "Buka pembayaran & tagihan spp tanpa filter periode/tahun",
+        "destination": "/spp?status=nunggak",
+        "data": {
+          "route": "spp",
+          "filters": {
+            "status": "nunggak"
+          }
+        }
+      }
+    ],
+    "meta": {
+      "engine": "JEV_CLOUD",
+      "latency_ms": 289.01,
+      "cached": false
+    },
+    "trace": {
+      "query": "spp nunggak bulan lalu",
+      "client_id": "1",
+      "user_role": "SUPERADMIN",
+      "start_time": 22455.677459,
+      "timings_ms": {
+        "classifier": 279,
+        "extractor": 0.28,
+        "resolver": 7.53,
+        "dispatcher": 1.27,
+        "total": 289.01
+      },
+      "step1_classifier": {
+        "engine": "JEV_CLOUD",
+        "latency_ms": 278.94,
+        "target_route": "spp",
+        "intent": "DIRECT_LINK",
+        "confidence_score": 0.95,
+        "confidence_level": "HIGH",
+        "decision_reason": "Matched via semantic classification to route \"spp\""
+      },
+      "step2_extractor": {
+        "tokens_parsed": [],
+        "stopwords_removed": [
+          "spp",
+          "nunggak",
+          "bulan",
+          "lalu"
+        ],
+        "time_hints": {
+          "hari_ini": false,
+          "bulan_ini": false,
+          "tahun_ini": false,
+          "tahun_ajaran_ini": false,
+          "tahun_ajaran_lalu": false
+        },
+        "regex_matches": [
+          {
+            "param": "status",
+            "matched_value": "nunggak",
+            "matched_phrase": "nunggak",
+            "rule": "\\b(nunggak|belum\\s*(bayar|lunas|setor|nyetor)|tertunggak|terlambat\\s*bayar|masih\\s*hutang|manarin)\\b|\\bpiring\\b"
+          },
+          {
+            "param": "periode",
+            "matched_value": "bulan_lalu",
+            "matched_phrase": "bulan lalu",
+            "rule": "\\b(bulan\\s*(lalu|kemarin|sebelumnya)|bulan\\s*yang\\s*lalu)\\b"
+          }
+        ],
+        "transformers_status": [
+          {
+            "param": "status",
+            "status": "STANDBY",
+            "matched_value": "nunggak"
+          },
+          {
+            "param": "periode",
+            "status": "STANDBY",
+            "matched_value": "bulan_lalu"
+          }
+        ],
+        "output_slots": {
+          "status": "nunggak",
+          "periode": "bulan_lalu"
+        }
+      },
+      "step3_resolver": {
+        "target_route": "spp",
+        "param_specs_evaluated": [
+          "siswa_id",
+          "kelas_id",
+          "status",
+          "periode",
+          "academic_year_id"
+        ],
+        "redis_operations": [
+          {
+            "key": "smartsearch:master:1:kelas_id",
+            "op": "GET",
+            "status": "HIT"
+          }
+        ],
+        "http_calls": [],
+        "token_exclusion": {
+          "consumed": [],
+          "remaining": [],
+          "skipped_calls": []
+        },
+        "resolved_params": {
+          "status": [],
+          "periode": []
+        }
+      },
+      "step4_dispatcher": {
+        "base_url": "/spp",
+        "final_urls": [
+          "/spp?status=nunggak&created_at.%24gte=2026-09-01&created_at.%24lte=2026-09-30",
+          "/spp?status=nunggak"
+        ],
+        "total_options": 2,
+        "composite_confidence": 1,
+        "confidence_level": "HIGH"
+      }
+    }
+  }
+}
