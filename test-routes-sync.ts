@@ -57,18 +57,18 @@ const full = await getRoutesManifest("unit-full", "SUPERADMIN");
 check("returns upstream routes untouched", full.routes.length === 1 && full.routes[0].id === "spp");
 check("not marked degraded", !full.degraded);
 
-console.log("upstream failure still falls back (degraded)");
+console.log("upstream failure returns empty manifest (degraded, no hardcoded routes)");
 mockFetch(() => json({ error: "boom" }, 500));
 const http500 = await getRoutesManifest("unit-500", "SUPERADMIN");
-check("HTTP 500 -> fallback routes, degraded", http500.degraded === true && http500.routes.length > 0);
+check("HTTP 500 -> empty routes, degraded", http500.degraded === true && http500.routes.length === 0);
 
 mockFetch(() => Promise.reject(new Error("ECONNREFUSED")));
 const down = await getRoutesManifest("unit-down", "SUPERADMIN");
-check("connection refused -> fallback routes, degraded", down.degraded === true && down.routes.length > 0);
+check("connection refused -> empty routes, degraded", down.degraded === true && down.routes.length === 0);
 
 mockFetch(() => json({ nope: true }));
 const malformed = await getRoutesManifest("unit-malformed", "SUPERADMIN");
-check("body without routes array -> fallback routes, degraded", malformed.degraded === true && malformed.routes.length > 0);
+check("body without routes array -> empty routes, degraded", malformed.degraded === true && malformed.routes.length === 0);
 
 globalThis.fetch = realFetch;
 console.log(`\n${passed}/${passed + failed} passed`);

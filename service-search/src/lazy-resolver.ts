@@ -28,12 +28,7 @@ export interface MasterItem {
   name: string;
   code?: string;
   is_active?: number;
-  wali_kelas?: string;
-  kelas?: string;
-  kelas_id?: string;
-  nisn?: string;
-  status?: string;
-  raw: Record<string, any>;
+  raw: Record<string, any>; // full row from the master endpoint; app-specific fields live here
 }
 
 export interface ResolvedParam {
@@ -58,11 +53,6 @@ function normalizeItems(json: any): MasterItem[] {
     name: String(r.name ?? r.nama ?? ""),
     code: r.code !== undefined ? String(r.code) : undefined,
     is_active: r.is_active !== undefined ? Number(r.is_active) : undefined,
-    wali_kelas: r.wali_kelas,
-    kelas: r.kelas,
-    kelas_id: r.kelas_id,
-    nisn: r.nisn,
-    status: r.status,
     raw: r,
   }));
 }
@@ -237,11 +227,26 @@ function fuzzyRank(token: string, items: MasterItem[]): MasterItem[] {
 // 3 = exact, or the whole field appears inside the phrase ("bahasa inggris" in the query)
 // 2 = token is a whole word of the field ("siti" in "Siti Rahma")
 // 1 = token is only a substring of the field
+// True when `f` (normalized field) equals a run of whole words of the phrase, so a short field
+// like "in" never matches inside "belum bayar spp bulan ini", while "8 b" still matches "8b".
+function containsWordSpan(t: string, phrase: string, f: string): boolean {
+  if (t === f) return true;
+  const words = phrase.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    let acc = "";
+    for (let j = i; j < words.length && acc.length < f.length; j++) {
+      acc += words[j];
+      if (acc === f) return true;
+    }
+  }
+  return false;
+}
+
 function matchTier(token: string, field: string): number {
   const t = norm(token);
   const f = norm(field);
   if (!t || !f) return 0;
-  if (f === t || t.includes(f)) return 3;
+  if (f === t || containsWordSpan(t, token, f)) return 3;
   if (f.includes(t)) return field.toLowerCase().split(/[^a-z0-9]+/).includes(t) ? 2 : 1;
   return 0;
 }
@@ -325,7 +330,7 @@ export async function resolveParams(
   const consumedTokens = new Set<string>();
   const listWork: Promise<ResolvedParam | null>[] = [];
   for (const spec of listParams) {
-    if (spec.key === "academic_year_id") continue;
+    if (spec.time_slot === "academic_year") continue;
     // Trigger detection: hanya fetch master jika slot ini relevan di kalimat
     if (spec.hint_regex && !testRegexSafe(spec.hint_regex, extraction.query)) {
       if (rTrace) rTrace.token_exclusion.skipped_calls.push(`${spec.key} (hint_regex mismatch)`);
@@ -410,7 +415,7 @@ export async function resolveParams(
   const enumFallbacks = (await Promise.all(enumFallbackWork)).filter(Boolean) as { spec: ParamSpec; source: "enum" | "semantic" }[];
   // Semua slot enum / date_range yang sudah terisi (regex di atas / semantic fallback di sini)
   // masuk ke enumParams agar dispatcher memiliki label sumber + filter yang valid.
-  const enumSpecs = specs.filter((s) => ((s.mode ?? null) === "enum" || s.mode === "date_range") && extraction.enumValues[s.key]);
+  const enumSpecs = specs.filter((s) => ((s.mode ?? null) === "enum" || s.mode === "date_range" || s.mode === "date_month") && extraction.enumValues[s.key]);
   const enumParams = enumSpecs.map((spec) => {
     const fb = enumFallbacks.find((r) => r.spec === spec);
     return { spec, values: [] as MasterItem[], source: (fb ? fb.source : "enum") as "enum" | "semantic" };
@@ -461,8 +466,8 @@ export async function resolveParams(
     rTrace.token_exclusion.remaining = extraction.tokens.filter((t) => !consumedTokens.has(norm(t)));
   }
 
-  // --- Slot "academic_year_id": utamakan tahun eksplisit (mis. "2024/2025") sebelum relative active context ---
-  const aySpec = specs.find((s) => s.key === "academic_year_id");
+  // --- Slot time_slot "academic_year": utamakan tahun eksplisit (mis. "2024/2025") sebelum relative active context ---
+  const aySpec = specs.find((s) => s.time_slot === "academic_year");
   const explicitYearMatch = extraction.query.match(/\b(\d{4}\/\d{4})\b/);
 
   if (aySpec && aySpec.endpoint && explicitYearMatch) {
@@ -511,35 +516,20 @@ export async function resolveParams(
 }
 
 // Cocokkan extraction.tokens ke daftar item master (sudah di-cache)
-// Untuk kelas: cek code, name, dan (jika diberikan) match_field wali_kelas.
+// Cek name, dan (jika diberikan) match_field dari baris master.
 // Untuk subject/academic_year dsb: cocokkan name (contains/exact).
 function matchListItems(extraction: RawExtraction, spec: ParamSpec, items: MasterItem[]): MasterItem[] {
-  // Slot waktu spesial: "tahun ajaran ini" -> item is_active=1
-  if (spec.key === "academic_year_id") {
-    if (extraction.timeHints.tahun_ajaran_ini || extraction.timeHints.tahun_ini) {
-      const active = items.filter((i) => i.is_active === 1);
-      if (active.length > 0) return active;
-    }
-    // Explicit: "2025/2026" -> match name
-    const yearMatch = extraction.query.match(/\b(\d{4}\/\d{4})\b/);
-    if (yearMatch) {
-      const found = items.filter((i) => norm(i.name) === norm(yearMatch[1]));
-      if (found.length > 0) return found;
-    }
-    return [];
-  }
-
   const fields: ((i: MasterItem) => string)[] = [];
-  // wali kelas param: match_field wali_kelas
-  if (spec.match_field && spec.match_field === "wali_kelas") fields.push((i) => i.wali_kelas || "");
+  // match_field: extra field of the master row to match against (e.g. a person's name)
+  const matchField = spec.match_field;
+  if (matchField) fields.push((i) => String(i.raw?.[matchField] ?? ""));
   fields.push((i) => i.name);
   const fuzzyFields = [...fields]; // codes/ids are too short for typo matching
-  if (spec.key === "kelas_id") fields.push((i) => i.code || "", (i) => i.id);
 
   // Rank each item by its best field/token match, keep only the top tier:
   // "bahasa inggris" must not also return "Bahasa Indonesia", but equal-tier ties
   // (two people named "Siti") are all kept.
-  const abbrevOk = spec.key !== "kelas_id" && !spec.match_field;
+  const abbrevOk = !spec.match_field;
   const scored: { item: MasterItem; score: number }[] = [];
   for (const item of items) {
     let score = 0;

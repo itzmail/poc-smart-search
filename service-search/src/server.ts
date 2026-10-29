@@ -258,7 +258,10 @@ const server = http.createServer(async (req, res) => {
       // (d) Scoped extraction hanya untuk allowed_params route terpilih
       const tExtract0 = performance.now();
       const extractionAudit: ExtractionAudit = { regexMatches: [], stopwordsFiltered: [] };
-      const extraction = extractRawParams(trimmedQuery, selectedRoute?.allowed_params || [], extractionAudit);
+      const extraction = extractRawParams(trimmedQuery, selectedRoute?.allowed_params || [], extractionAudit, {
+        routes: dynamicRoutes,
+        referenceDate: manifest.active_context?.today,
+      });
       trace.timings_ms.extractor = Math.round((performance.now() - tExtract0) * 100) / 100;
 
       trace.step2_extractor = {

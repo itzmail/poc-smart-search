@@ -3,8 +3,9 @@
 // Regex 0ms + trigger detection. Nilai enum & token kandidat diekstrak di sini;
 // pencocokan ke data master (lazy fetch + Redis) dilakukan di lazy-resolver.
 // ---------------------------------------------------------------------------
-import type { ParamSpec } from "./routes-sync.js";
+import type { AppRoute, ParamSpec } from "./routes-sync.js";
 import { normalizeQuery } from "./normalize.js";
+import { MONTHS, resolveMonthRange } from "./date-range.js";
 
 export interface RawExtraction {
   query: string;                    // kalimat asli (lowercased)
@@ -19,49 +20,101 @@ export interface RawExtraction {
   };
 }
 
-const STOPWORDS = new Set([
+// Generic Indonesian function words only. Domain words (siswa, kelas, spp, nunggak, ...) come from
+// the route manifest via buildDomainVocab, so another app only has to change its data.
+const BASE_STOPWORDS = new Set([
   "aku", "ingin", "yang", "dan", "dari", "mana", "saja", "bisa", "buat", "lihat", "cek",
-  "ini", "itu", "belum", "sudah", "bayar", "bulan", "hari", "tahun", "ajaran", "pelajaran",
-  "nunggak", "lunas", "tagihan", "tunggakan", "cetak", "semua", "daftar", "rekap", "total",
-  "berapa", "tolong", "tunjukkan", "buka", "data", "status", "siapa", "apakah", "aktif",
-  "untuk", "pada", "dengan", "oleh", "kepada",
-  "semester", "kelas", "ruang", "rombel", "tingkat", "ada", "di", "ke", "the", "apa",
-  "wali", "guru", "ibu", "bapak", "murid", "santri", "siswa", "anak", "bernama", "profil", "biodata", "adalah", "bertanya",
-  "spp", "syahriah", "kas", "nilai", "rapot", "rapor", "uang", "duit", "riwayat",
-  "atas", "nama", "bu", "pak", "sebelumnya",
-  "minggu", "kemarin", "lalu", "sekarang", "berjalan", "udah", "yg", "milik", "punya", "format", "pdf", "excel",
+  "ini", "itu", "belum", "sudah", "bulan", "hari", "tahun", "ajaran", "pelajaran",
+  "semua", "daftar", "total", "berapa", "tolong", "tunjukkan", "buka", "data", "siapa", "apakah",
+  "untuk", "pada", "dengan", "oleh", "kepada", "semester", "ada", "di", "ke", "the", "apa",
+  "ibu", "bapak", "anak", "bernama", "adalah", "bertanya", "atas", "nama", "bu", "pak", "sebelumnya",
+  "minggu", "kemarin", "lalu", "sekarang", "berjalan", "udah", "yg", "milik", "punya",
+  ...MONTHS, // month names are time words, never entity candidates
 ]);
 
+export interface DomainVocab {
+  stopwords: Set<string>;
+  entityAnchors: string[]; // words that introduce an entity name ("siswa budi")
+  listAnchors: string[];   // words that introduce a master-list item ("kelas 7a")
+  enumWords: string[];     // literal words of enum values / hint regexes
+}
+
+const wordsOf = (s: string): string[] => s.toLowerCase().match(/[a-z]{3,}/g) ?? [];
+const regexWords = (rx: string): string[] => wordsOf(rx.replace(/\\./g, " "));
+const resourceOf = (endpoint?: string): string => (endpoint ?? "").split("/").filter(Boolean).pop() ?? "";
+
+// Single-word keywords of the routes that list `resource` as a standalone keyword
+// (route "siswa" -> siswa, murid, santri, ...): the tenant's own names for that entity.
+function anchorsFor(routes: AppRoute[], resource: string): string[] {
+  if (!/^[a-z]+$/.test(resource)) return [];
+  const out = new Set<string>([resource]);
+  for (const r of routes) {
+    const kws = r.keywords.map((k) => k.toLowerCase().trim());
+    if (!kws.includes(resource)) continue;
+    for (const k of kws) if (/^[a-z]{3,}$/.test(k)) out.add(k);
+  }
+  return [...out];
+}
+
+export function buildDomainVocab(routes: AppRoute[] = []): DomainVocab {
+  const stopwords = new Set<string>(BASE_STOPWORDS);
+  const enumWords = new Set<string>();
+  const entity = new Set<string>();
+  const list = new Set<string>();
+  for (const r of routes) {
+    for (const w of [...r.keywords.flatMap(wordsOf), ...wordsOf(r.title)]) stopwords.add(w);
+    for (const spec of r.allowed_params || []) {
+      if (spec.hint_regex) for (const w of regexWords(spec.hint_regex)) enumWords.add(w);
+      if (spec.mode === "enum" && spec.values) {
+        for (const rx of Object.values(spec.values)) for (const w of regexWords(rx)) enumWords.add(w);
+      }
+      if (spec.mode === "search") for (const w of anchorsFor(routes, resourceOf(spec.endpoint))) entity.add(w);
+      if ((spec.mode ?? "list") === "list" && spec.endpoint) for (const w of anchorsFor(routes, resourceOf(spec.endpoint))) list.add(w);
+    }
+  }
+  for (const w of enumWords) stopwords.add(w);
+  for (const w of [...entity, ...list]) stopwords.add(w);
+  return { stopwords, entityAnchors: [...entity], listAnchors: [...list], enumWords: [...enumWords] };
+}
+
 // Extract kandidat token kontekstual (mengikat kata setelah kata penunjuk entitas)
-function extractTokens(query: string): string[] {
+function extractTokens(query: string, vocab: DomainVocab): string[] {
   const lower = query.toLowerCase();
   const tokens: string[] = [];
+  const stop = vocab.stopwords;
+  const alt = (ws: string[]) => ws.map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean).join("|");
 
-  // 1. Contextual anchors: ambil nama tepat setelah kata penunjuk peran (siswa/murid/anak/dll)
-  const studentPattern = /(?:siswa|student|murid|santri|anak|atas\s+nama|nama)\s+(?:bernama\s+)?([a-z0-9\s]+?)(?:\s+(?:ada|di|kelas|semester|status|yang|lunas|nunggak|belum|sudah)\b|\s*$)/i;
+  // 1. Contextual anchors: ambil nama tepat setelah kata penunjuk entitas (dari manifest + kata umum)
+  const entityAlt = alt([...vocab.entityAnchors, "anak"]);
+  const stopAlt = alt([...vocab.listAnchors, ...vocab.enumWords, "semester"]);
+  const studentPattern = new RegExp(
+    `(?:${entityAlt}|atas\\s+nama|nama)\\s+(?:bernama\\s+)?([a-z0-9\\s]+?)(?:\\s+(?:ada|di|yang|belum|sudah${stopAlt ? "|" + stopAlt : ""})\\b|\\s*$)`,
+    "i"
+  );
   const studentMatch = query.match(studentPattern);
   if (studentMatch?.[1]) {
     const candidate = studentMatch[1].trim();
     // Reject phrases that contain any stopword ("kelas 7a", "nunggak"): only clean names qualify
-    if (candidate.length >= 2 && !candidate.toLowerCase().split(/\s+/).some((w) => STOPWORDS.has(w))) {
+    if (candidate.length >= 2 && !candidate.toLowerCase().split(/\s+/).some((w) => stop.has(w))) {
       tokens.push(candidate);
     }
   }
 
-  // 2. Contextual anchors: ambil kode/nama kelas tepat setelah kata "kelas/rombel/ruang"
-  const classPattern = /(?:kelas|rombel|ruang|tingkat)\s+([a-z0-9-]+)/i;
-  const classMatch = query.match(classPattern);
-  if (classMatch?.[1]) {
-    const candidate = classMatch[1].trim();
-    if (!STOPWORDS.has(candidate.toLowerCase())) {
-      tokens.push(candidate);
+  // 2. Contextual anchors: ambil kode/nama item master tepat setelah kata penunjuknya (mis. "kelas 7a")
+  if (vocab.listAnchors.length > 0) {
+    const classMatch = query.match(new RegExp(`(?:${alt(vocab.listAnchors)})\\s+([a-z0-9-]+)`, "i"));
+    if (classMatch?.[1]) {
+      const candidate = classMatch[1].trim();
+      if (!stop.has(candidate.toLowerCase())) {
+        tokens.push(candidate);
+      }
     }
   }
 
   // 3. Token individual (>=2 char & mengandung huruf — agar token seperti "8b" atau nama bebas tidak hilang)
   for (const w of lower.split(/\s+/)) {
     const clean = w.replace(/[^a-z0-9]/gi, "");
-    if (clean.length >= 2 && /[a-z]/.test(clean) && !STOPWORDS.has(clean)) {
+    if (clean.length >= 2 && /[a-z]/.test(clean) && !stop.has(clean)) {
       tokens.push(clean);
     }
   }
@@ -84,8 +137,10 @@ export interface ExtractionAudit {
 export function extractRawParams(
   query: string,
   allowedParams: ParamSpec[] = [],
-  audit?: ExtractionAudit
+  audit?: ExtractionAudit,
+  ctx: { routes?: AppRoute[]; referenceDate?: string } = {}
 ): RawExtraction {
+  const vocab = buildDomainVocab(ctx.routes);
   const lower = normalizeQuery(query);
   const enumValues: Record<string, string> = {};
 
@@ -115,6 +170,13 @@ export function extractRawParams(
     }
   }
 
+  // mode date_month: nomor bulan 1-12; spec pertama = awal, kedua = akhir (urutan di manifest)
+  const monthSpecs = allowedParams.filter((s) => s.mode === "date_month");
+  if (monthSpecs.length > 0) {
+    const months = resolveMonthRange(lower, ctx.referenceDate);
+    if (months) monthSpecs.forEach((spec, i) => (enumValues[spec.key] = String(months[Math.min(i, 1)])));
+  }
+
   // Slot waktu: "tahun ajaran ini" vs "tahun ini" vs "bulan ini" vs "hari ini"
   const timeHints = {
     hari_ini: /\b(hari\s*ini)\b/i.test(lower),
@@ -131,11 +193,11 @@ export function extractRawParams(
       /\b(tahun|th(a)?n\??)\s*(ajaran|pelajaran|ajar)\s*(lalu|kemarin|sebelumnya)\b/i.test(lower),
   };
 
-  const parsedTokens = extractTokens(lower);
+  const parsedTokens = extractTokens(lower, vocab);
   if (audit) {
     // Cari token yang disaring stopword
     const allWords = lower.replace(/[^a-z0-9\s]/gi, " ").split(/\s+/).filter(Boolean);
-    audit.stopwordsFiltered = allWords.filter((w) => STOPWORDS.has(w) && !parsedTokens.includes(w));
+    audit.stopwordsFiltered = allWords.filter((w) => vocab.stopwords.has(w) && !parsedTokens.includes(w));
   }
 
   return {

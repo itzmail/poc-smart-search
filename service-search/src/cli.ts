@@ -82,7 +82,7 @@ async function main() {
         const routes = manifest.routes;
         const classification = await classifyIntent(q, currentEngine as any, routes.map((r) => ({ id: r.id, title: r.title, description: r.description, path: r.path })));
         const route = classification.target_route ? routes.find((r) => r.id === classification.target_route) : undefined;
-        const extraction = extractRawParams(q, route?.allowed_params || []);
+        const extraction = extractRawParams(q, route?.allowed_params || [], undefined, { routes, referenceDate: manifest.active_context?.today });
         const resolved = route
           ? await resolveParams(extraction, route.allowed_params || [], {
               clientId: "1",

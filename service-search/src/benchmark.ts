@@ -50,7 +50,7 @@ async function runBenchmarkForEngine(engineName: "jev" | "local") {
     const tc = TEST_CASES[i];
     const classification = await classifyIntent(tc.query, engineName);
     const route = classification.target_route ? dynamicRoutes.find((r) => r.id === classification.target_route) : undefined;
-    const extraction = extractRawParams(tc.query, route?.allowed_params || []);
+    const extraction = extractRawParams(tc.query, route?.allowed_params || [], undefined, { routes: dynamicRoutes });
     const response = dispatchAction(tc.query, classification, extraction, route, dynamicRoutes, [], 0.2);
 
     const isMatch = classification.intent === tc.expected;

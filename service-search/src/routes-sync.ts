@@ -9,10 +9,15 @@ import { appEducationBreaker } from "./breaker.js";
 //   "search"     -> pencarian entity per-token via query_param (butuh endpoint)
 //   "enum"       -> nilai dari regex DB (values) atau semantic fallback (tanpa endpoint)
 //   "date_range" -> rentang tanggal (gte & lte) yang dihitung dari hint waktu (tanpa endpoint)
+//   "date_month" -> nomor bulan 1-12 dari hint waktu; spec pertama = awal, kedua = akhir (tanpa endpoint)
+//   "text"       -> teks bebas, tidak di-resolve (tanpa endpoint)
+// time_slot (opsional): menandai param list sebagai tahun ajaran, agar "tahun ajaran ini/lalu"
+//   diselesaikan dari active_context / master (tanpa menebak nama key).
 export interface ParamSpec {
   key: string;
   endpoint?: string;
-  mode?: "list" | "search" | "enum" | "date_range";
+  mode?: "list" | "search" | "enum" | "date_range" | "date_month" | "text";
+  time_slot?: "academic_year";
   query_param?: string;
   param_gte?: string;
   param_lte?: string;
@@ -54,7 +59,7 @@ export interface RoutesManifest {
 const DEGRADED_TTL_SECONDS = parseInt(process.env.SMARTSEARCH_DEGRADED_TTL || "20", 10);
 
 export interface ResolvedEntity {
-  type: "kelas" | "invoice" | "siswa" | "agregasi";
+  type: string;
   id: string;
   code?: string;
   name: string;
@@ -64,152 +69,6 @@ export interface ResolvedEntity {
 }
 
 const APP_EDUCATION_URL = process.env.APP_EDUCATION_URL || "http://127.0.0.1:3000";
-
-// Fallback jika backend app belum menyala saat pertama kali start (Pintro NG routes)
-const FALLBACK_ROUTES: AppRoute[] = [
-  {
-    id: "siswa",
-    title: "Master Data Siswa",
-    path: "/ng_student",
-    description: "Daftar data induk siswa, profil murid, filter kelas dan status",
-    keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "filter[name]",
-        endpoint: "/api/smart-search/siswa",
-        mode: "search",
-        query_param: "q",
-      },
-      {
-        key: "filter[ng_class_level_id]",
-        endpoint: "/api/smart-search/kelas",
-        mode: "list",
-      },
-      {
-        key: "filter[status]",
-        mode: "enum",
-        values: {
-          "1": "\\b(aktif|masih\\s*belajar)\\b",
-          "0": "\\b(pindah|tidak\\s*aktif)\\b",
-          "2": "\\b(lulus|alumni)\\b",
-          "3": "\\b(cuti|ditangguhkan)\\b",
-        },
-        hint_regex: "\\b(status|aktif|pindah|lulus|cuti)\\b",
-      },
-    ],
-  },
-  {
-    id: "siswa_detail",
-    title: "Detail Profil Siswa",
-    path: "/ng_student/detail/:id",
-    description: "Profil lengkap biodata siswa, data orang tua, riwayat pendidikan",
-    keywords: ["profil siswa", "biodata siswa", "detail murid", "data pribadi siswa"],
-    supported_intents: ["DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "id",
-        endpoint: "/api/smart-search/siswa",
-        mode: "search",
-        query_param: "q",
-      },
-    ],
-  },
-  {
-    id: "spp",
-    title: "Pembayaran & Tagihan SPP",
-    path: "/ng_account_invoice_student",
-    description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah",
-    keywords: ["spp", "bayar", "tagihan", "nunggak", "invoice", "tunggakan", "keuangan"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "filter[name]",
-        endpoint: "/api/smart-search/siswa",
-        mode: "search",
-        query_param: "q",
-      },
-      {
-        key: "filter[ng_class_level_id]",
-        endpoint: "/api/smart-search/kelas",
-        mode: "list",
-      },
-      {
-        key: "filter[status]",
-        mode: "enum",
-        values: {
-          "0": "\\b(nunggak|belum\\s*(bayar|lunas)|tunggakan)\\b",
-          "1": "\\b(lunas|sudah\\s*bayar)\\b",
-        },
-        hint_regex: "\\b(status|lunas|nunggak|tunggakan)\\b",
-      },
-      {
-        key: "filter[year]",
-        endpoint: "/api/smart-search/academic-years",
-        mode: "list",
-        hint_regex: "tahun\\s*(ajaran|pelajaran)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}",
-      },
-    ],
-  },
-  {
-    id: "invoice_students",
-    title: "Daftar Tagihan & Kuitansi Siswa",
-    path: "/ng_invoice_students",
-    description: "Daftar riwayat invoice, kuitansi pembayaran, dan cetak kuitansi siswa",
-    keywords: ["invoice", "kuitansi", "kwitansi", "tagihan siswa", "cetak kuitansi", "bukti bayar"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "filter[name]",
-        endpoint: "/api/smart-search/siswa",
-        mode: "search",
-        query_param: "q",
-      },
-      {
-        key: "filter[ng_class_level_id]",
-        endpoint: "/api/smart-search/kelas",
-        mode: "list",
-      },
-    ],
-  },
-  {
-    id: "invoice_students_detail",
-    title: "Detail Invoice & Kuitansi Siswa",
-    path: "/ng_invoice_students/detail/:id",
-    description: "Halaman rincian tagihan per siswa, detail kwitansi dan status pembayaran",
-    keywords: ["detail invoice", "detail tagihan", "rincian spp siswa", "detail kuitansi"],
-    supported_intents: ["DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "id",
-        endpoint: "/api/smart-search/siswa",
-        mode: "search",
-        query_param: "q",
-      },
-    ],
-  },
-  {
-    id: "status_spp",
-    title: "Rekap Status Pembayaran SPP",
-    path: "/ng_payment_spp_status",
-    description: "Laporan matriks dan rekapitulasi status pembayaran SPP per bulan / tahun ajaran",
-    keywords: ["status spp", "rekap spp", "matriks spp", "laporan spp", "pembayaran bulanan"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [
-      {
-        key: "filter[ng_class_level_id]",
-        endpoint: "/api/smart-search/kelas",
-        mode: "list",
-      },
-      {
-        key: "filter[year]",
-        endpoint: "/api/smart-search/academic-years",
-        mode: "list",
-        hint_regex: "tahun\\s*(ajaran|pelajaran)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}",
-      },
-    ],
-  },
-];
 
 export async function getRoutesManifest(
   clientId: string = "1",
@@ -252,7 +111,7 @@ export async function getRoutesManifest(
       if (res.ok) {
         appEducationBreaker.success();
         const data = await res.json();
-        // Array kosong dari upstream sehat = role/tenant tanpa izin: jangan jatuh ke FALLBACK_ROUTES
+        // Array kosong dari upstream sehat = role/tenant tanpa izin: jangan dianggap gagal
         if (Array.isArray(data.routes)) {
           const manifest: RoutesManifest = {
             routes: data.routes,
@@ -265,16 +124,15 @@ export async function getRoutesManifest(
         appEducationBreaker.failure();
       }
     } catch {
-      // Backend mungkin belum nyala, gunakan fallback
+      // Backend mungkin belum nyala
       appEducationBreaker.failure();
     }
   }
 
-  // 3. Fallback ke routes bawaan: tandai degraded dan cache singkat agar blip sesaat
-  //    tidak mengunci tenant tanpa filter selama TTL penuh
-  const fallbackManifest: RoutesManifest = { routes: FALLBACK_ROUTES, degraded: true };
-  await cacheSet(routesCacheKey, JSON.stringify(fallbackManifest), DEGRADED_TTL_SECONDS);
-  return fallbackManifest;
+  // 3. Upstream tidak tersedia: tidak ada route hardcode, kembalikan kosong + degraded
+  const degradedManifest: RoutesManifest = { routes: [], degraded: true };
+  await cacheSet(routesCacheKey, JSON.stringify(degradedManifest), DEGRADED_TTL_SECONDS);
+  return degradedManifest;
 }
 
 // Backward-compat wrapper: kembalikan hanya array routes
