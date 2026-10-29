@@ -23,6 +23,7 @@ export interface RawExtraction {
 // Generic Indonesian function words only. Domain words (siswa, kelas, spp, nunggak, ...) come from
 // the route manifest via buildDomainVocab, so another app only has to change its data.
 const BASE_STOPWORDS = new Set([
+  "cari", "mencari", "pencarian",
   "aku", "ingin", "yang", "dan", "dari", "mana", "saja", "bisa", "buat", "lihat", "cek",
   "ini", "itu", "belum", "sudah", "bulan", "hari", "tahun", "ajaran", "pelajaran",
   "semua", "daftar", "total", "berapa", "tolong", "tunjukkan", "buka", "data", "siapa", "apakah",
