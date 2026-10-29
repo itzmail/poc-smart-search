@@ -65,61 +65,149 @@ export interface ResolvedEntity {
 
 const APP_EDUCATION_URL = process.env.APP_EDUCATION_URL || "http://127.0.0.1:3000";
 
-// Fallback jika backend app belum menyala saat pertama kali start (semua code lowercase)
+// Fallback jika backend app belum menyala saat pertama kali start (Pintro NG routes)
 const FALLBACK_ROUTES: AppRoute[] = [
-  {
-    id: "dashboard",
-    title: "Dashboard Utama",
-    path: "/dashboard",
-    description: "Statistik umum sekolah, total siswa, dan ringkasan pembayaran",
-    keywords: ["home", "beranda", "dashboard", "utama", "statistik"],
-    supported_intents: ["LIST_MENU"],
-    allowed_params: [],
-  },
   {
     id: "siswa",
     title: "Master Data Siswa",
-    path: "/siswa",
+    path: "/ng_student",
     description: "Daftar data induk siswa, profil murid, filter kelas dan status",
     keywords: ["siswa", "murid", "santri", "pelajar", "data siswa", "profil"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [],
+    allowed_params: [
+      {
+        key: "filter[name]",
+        endpoint: "/api/smart-search/siswa",
+        mode: "search",
+        query_param: "q",
+      },
+      {
+        key: "filter[ng_class_level_id]",
+        endpoint: "/api/smart-search/kelas",
+        mode: "list",
+      },
+      {
+        key: "filter[status]",
+        mode: "enum",
+        values: {
+          "1": "\\b(aktif|masih\\s*belajar)\\b",
+          "0": "\\b(pindah|tidak\\s*aktif)\\b",
+          "2": "\\b(lulus|alumni)\\b",
+          "3": "\\b(cuti|ditangguhkan)\\b",
+        },
+        hint_regex: "\\b(status|aktif|pindah|lulus|cuti)\\b",
+      },
+    ],
   },
   {
-    id: "nilai",
-    title: "Penilaian Akademik Siswa",
-    path: "/nilai",
-    description: "Buku nilai siswa, rekap nilai harian, PTS, PAS, per mata pelajaran",
-    keywords: ["nilai", "akademik", "skor", "ulangan", "rapor", "mata pelajaran", "mapel"],
-    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [],
+    id: "siswa_detail",
+    title: "Detail Profil Siswa",
+    path: "/ng_student/detail/:id",
+    description: "Profil lengkap biodata siswa, data orang tua, riwayat pendidikan",
+    keywords: ["profil siswa", "biodata siswa", "detail murid", "data pribadi siswa"],
+    supported_intents: ["DIRECT_LINK"],
+    allowed_params: [
+      {
+        key: "id",
+        endpoint: "/api/smart-search/siswa",
+        mode: "search",
+        query_param: "q",
+      },
+    ],
   },
   {
     id: "spp",
     title: "Pembayaran & Tagihan SPP",
-    path: "/spp",
-    description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah, kas keuangan",
-    keywords: ["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "invoice"],
+    path: "/ng_account_invoice_student",
+    description: "Kelola tagihan SPP, siswa nunggak, pembayaran uang sekolah",
+    keywords: ["spp", "bayar", "tagihan", "nunggak", "invoice", "tunggakan", "keuangan"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [],
+    allowed_params: [
+      {
+        key: "filter[name]",
+        endpoint: "/api/smart-search/siswa",
+        mode: "search",
+        query_param: "q",
+      },
+      {
+        key: "filter[ng_class_level_id]",
+        endpoint: "/api/smart-search/kelas",
+        mode: "list",
+      },
+      {
+        key: "filter[status]",
+        mode: "enum",
+        values: {
+          "0": "\\b(nunggak|belum\\s*(bayar|lunas)|tunggakan)\\b",
+          "1": "\\b(lunas|sudah\\s*bayar)\\b",
+        },
+        hint_regex: "\\b(status|lunas|nunggak|tunggakan)\\b",
+      },
+      {
+        key: "filter[year]",
+        endpoint: "/api/smart-search/academic-years",
+        mode: "list",
+        hint_regex: "tahun\\s*(ajaran|pelajaran)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}",
+      },
+    ],
   },
   {
-    id: "rapot",
-    title: "Cetak & Distribusi Rapot",
-    path: "/rapot",
-    description: "Aksi cetak dokumen rapor, unduh PDF rapor per siswa atau per kelas",
-    keywords: ["rapot", "rapor", "cetak", "unduh", "download", "pdf", "leger"],
-    supported_intents: ["LIST_MENU", "REPORT_ACTION"],
-    allowed_params: [],
+    id: "invoice_students",
+    title: "Daftar Tagihan & Kuitansi Siswa",
+    path: "/ng_invoice_students",
+    description: "Daftar riwayat invoice, kuitansi pembayaran, dan cetak kuitansi siswa",
+    keywords: ["invoice", "kuitansi", "kwitansi", "tagihan siswa", "cetak kuitansi", "bukti bayar"],
+    supported_intents: ["LIST_MENU", "DIRECT_LINK"],
+    allowed_params: [
+      {
+        key: "filter[name]",
+        endpoint: "/api/smart-search/siswa",
+        mode: "search",
+        query_param: "q",
+      },
+      {
+        key: "filter[ng_class_level_id]",
+        endpoint: "/api/smart-search/kelas",
+        mode: "list",
+      },
+    ],
   },
   {
-    id: "kelas",
-    title: "Master Ruang Kelas",
-    path: "/kelas",
-    description: "Data ruang kelas, rombel, dan wali kelas",
-    keywords: ["kelas", "ruang kelas", "rombel", "wali kelas"],
+    id: "invoice_students_detail",
+    title: "Detail Invoice & Kuitansi Siswa",
+    path: "/ng_invoice_students/detail/:id",
+    description: "Halaman rincian tagihan per siswa, detail kwitansi dan status pembayaran",
+    keywords: ["detail invoice", "detail tagihan", "rincian spp siswa", "detail kuitansi"],
+    supported_intents: ["DIRECT_LINK"],
+    allowed_params: [
+      {
+        key: "id",
+        endpoint: "/api/smart-search/siswa",
+        mode: "search",
+        query_param: "q",
+      },
+    ],
+  },
+  {
+    id: "status_spp",
+    title: "Rekap Status Pembayaran SPP",
+    path: "/ng_payment_spp_status",
+    description: "Laporan matriks dan rekapitulasi status pembayaran SPP per bulan / tahun ajaran",
+    keywords: ["status spp", "rekap spp", "matriks spp", "laporan spp", "pembayaran bulanan"],
     supported_intents: ["LIST_MENU", "DIRECT_LINK"],
-    allowed_params: [],
+    allowed_params: [
+      {
+        key: "filter[ng_class_level_id]",
+        endpoint: "/api/smart-search/kelas",
+        mode: "list",
+      },
+      {
+        key: "filter[year]",
+        endpoint: "/api/smart-search/academic-years",
+        mode: "list",
+        hint_regex: "tahun\\s*(ajaran|pelajaran)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}",
+      },
+    ],
   },
 ];
 
@@ -150,11 +238,13 @@ export async function getRoutesManifest(
   // 2. Fetch fresh manifest dari Backend App Pendidikan dengan header ACL Pintro
   if (appEducationBreaker.allow()) {
     try {
-      const res = await fetch(`${APP_EDUCATION_URL}/api/routes`, {
+      const routesEndpoint = process.env.ROUTES_MANIFEST_ENDPOINT || "/api/smart-search/routes";
+      const authToken = auth || process.env.AUTH_TOKEN;
+      const res = await fetch(`${APP_EDUCATION_URL}${routesEndpoint}`, {
         headers: {
           "X-Client-Id": clientId,
           "X-User-Role": role,
-          ...(auth ? { Authorization: auth } : {}),
+          ...(authToken ? { Authorization: authToken } : {}),
         },
         signal: AbortSignal.timeout(1500),
       });

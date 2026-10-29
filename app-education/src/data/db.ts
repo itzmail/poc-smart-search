@@ -622,13 +622,13 @@ export function initDatabase() {
       JSON.stringify(["home", "beranda", "dashboard", "utama", "statistik"]),
       JSON.stringify(["LIST_MENU"]), JSON.stringify([]), "1");
 
-    insertRoute.run("SR-02", "J02", "siswa", "Master Data Siswa", "/siswa",
+    insertRoute.run("SR-02", "J02", "siswa", "Master Data Siswa", "/ng_student",
       "Daftar dan profil data siswa, murid, dan santri dengan filter kelas dan status",
       JSON.stringify(["siswa", "murid", "santri", "pelajar", "data siswa", "profil"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
-        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
-        kelasParam,
-        { key: "status", mode: "enum", values: { aktif: "\\b(aktif|masih\\s*belajar)\\b", pindah: "\\b(pindah|pindahan)\\b", nunggak: "\\b(nunggak|belum\\s*(bayar|lunas))\\b", lunas: "\\b(lunas|sudah\\s*bayar)\\b" } },
+        { key: "filter[name]", endpoint: "/api/smart-search/siswa", mode: "search", query_param: "q" },
+        { key: "filter[ng_class_level_id]", endpoint: "/api/smart-search/kelas", mode: "list" },
+        { key: "filter[status]", mode: "enum", values: { "1": "\\b(aktif|masih\\s*belajar)\\b", "0": "\\b(pindah|tidak\\s*aktif)\\b", "2": "\\b(lulus|alumni)\\b", "3": "\\b(cuti|ditangguhkan)\\b" } },
       ]), "1");
 
     insertRoute.run("SR-03", "J03", "nilai", "Penilaian Akademik Siswa", "/nilai",
@@ -642,15 +642,14 @@ export function initDatabase() {
         academicYearParam,
       ]), "1");
 
-    insertRoute.run("SR-04", "J04", "spp", "Pembayaran & Tagihan SPP", "/spp",
+    insertRoute.run("SR-04", "J04", "spp", "Pembayaran & Tagihan SPP", "/ng_account_invoice_student",
       "Kelola tagihan SPP, list siswa nunggak, pembayaran uang sekolah, kas keuangan, dan iuran",
       JSON.stringify(["spp", "bayar", "tagihan", "nunggak", "keuangan", "iuran", "tunggakan", "syahriah"]),
       JSON.stringify(["LIST_MENU", "DIRECT_LINK"]), JSON.stringify([
-        { key: "siswa_id", endpoint: "/api/siswa", mode: "search", query_param: "q" },
-        kelasParam,
-        statusSppParam,
-        createdAtParam,
-        academicYearParam,
+        { key: "filter[name]", endpoint: "/api/smart-search/siswa", mode: "search", query_param: "q" },
+        { key: "filter[ng_class_level_id]", endpoint: "/api/smart-search/kelas", mode: "list" },
+        { key: "filter[status]", mode: "enum", values: { "0": "\\b(nunggak|belum\\s*(bayar|lunas)|tunggakan)\\b", "1": "\\b(lunas|sudah\\s*bayar)\\b" } },
+        { key: "filter[year]", endpoint: "/api/smart-search/academic-years", mode: "list", hint_regex: "tahun\\s*(ajaran|pelajaran)?\\s*(ini|sekarang|saat\\s*ini|aktif)|[0-9]{4}/[0-9]{4}" },
       ]), "1");
 
     insertRoute.run("SR-05", "J05", "rapot", "Cetak & Distribusi Rapot", "/rapot",

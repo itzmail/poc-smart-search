@@ -67,9 +67,9 @@ export function dispatchAction(
 
   if (route) {
     // --- 1. Entity-driven DIRECT_LINK options (siswa / wali_kelas / kelas) ---
-    const siswaResolved = params["siswa_id"];
+    const siswaResolved = params["filter[name]"] || params["id"] || params["siswa_id"];
     const waliResolved = params["wali_kelas"];
-    const kelasResolved = params["kelas_id"];
+    const kelasResolved = params["filter[ng_class_level_id]"] || params["kelas_id"];
 
     const isAskingClass = /\b(kelas|ruang|di\s*mana|kelas\s*berapa)\b/i.test(qLower);
     const isWaliContext = /\b(wali|ibu|bu\s|pak\b|bapak|guru)\b/i.test(qLower);
@@ -128,8 +128,25 @@ export function dispatchAction(
       }
     }
 
-    // 1B. Route "siswa": profil siswa per match
-    if (route.id === "siswa" && siswaResolved?.values.length) {
+    // 1B. Dynamic DETAIL routes with :id placeholder (e.g. /ng_student/detail/:id, /ng_invoice_students/detail/:id)
+    if (route.path.includes(":id") && siswaResolved?.values.length) {
+      for (const s of siswaResolved.values.slice(0, 8)) {
+        const dest = route.path.replace(":id", String(s.id));
+        options.push({
+          rank: options.length + 1,
+          score: r2(directProb),
+          intent: "DIRECT_LINK",
+          target_type: "DETAIL",
+          title: `${route.title}: ${siswaLabel(s.raw)}`,
+          description: `${route.description} (${siswaLabel(s.raw)}${s.kelas || s.raw?.kelas ? ` - Kelas ${s.kelas || s.raw?.kelas}` : ""})`,
+          destination: dest,
+          data: {
+            entity_role: "siswa",
+            siswa: { id: s.id, nisn: s.nisn || s.raw?.nisn, nama: siswaLabel(s.raw), kelas: s.kelas || s.raw?.kelas, kelas_id: s.kelas_id || s.raw?.kelas_id },
+          },
+        });
+      }
+    } else if (route.id === "siswa" && siswaResolved?.values.length) {
       for (const s of siswaResolved.values.slice(0, 8)) {
         options.push({
           rank: options.length + 1,
@@ -138,7 +155,7 @@ export function dispatchAction(
           target_type: "DETAIL",
           title: `Profil Siswa: ${siswaLabel(s.raw)}`,
           description: `Biodata ${siswaLabel(s.raw)} (Kelas ${s.kelas || s.raw?.kelas || "-"})`,
-          destination: `/siswa/${s.id}`,
+          destination: `/ng_student/detail/${s.id}`,
           data: {
             entity_role: "siswa",
             siswa: { id: s.id, nisn: s.nisn || s.raw?.nisn, nama: siswaLabel(s.raw), kelas: s.kelas || s.raw?.kelas, kelas_id: s.kelas_id || s.raw?.kelas_id },
@@ -179,8 +196,8 @@ export function dispatchAction(
       }
     }
 
-    // 1C. SPP/nilai/rapot: LIST route dengan query params dari resolved values
-    const isListRoute = ["spp", "siswa", "nilai", "dashboard"].includes(route.id) && options.length === 0;
+    // 1C. Dynamic LIST route dengan query params dari resolved values
+    const isListRoute = !route.path.includes(":id") && ["guru", "kelas"].indexOf(route.id) === -1 && options.length === 0;
 
     if (isListRoute) {
       const qs = new URLSearchParams();
@@ -226,7 +243,9 @@ export function dispatchAction(
       if (siswaResolved?.values[0] && (route.allowed_params || []).some((s) => s.mode === "search")) {
         const s = siswaResolved.values[0];
         const firstToken = siswaLabel(s.raw).split(/\s+/)[0];
-        if (firstToken) qs.set("q", firstToken);
+        const searchSpec = (route.allowed_params || []).find((s) => s.mode === "search");
+        const queryKey = searchSpec?.key || "q";
+        if (firstToken) qs.set(queryKey, firstToken);
       }
       const qsStr = qs.toString();
 

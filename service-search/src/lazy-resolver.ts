@@ -80,11 +80,12 @@ async function guarded<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function fetchMasterList(endpoint: string, clientId: string, role: string, auth?: string): Promise<MasterItem[]> {
+  const token = auth || process.env.AUTH_TOKEN;
   const res = await fetch(`${APP_EDUCATION_URL}${endpoint}`, {
     headers: {
       "X-Client-Id": clientId,
       "X-User-Role": role.toUpperCase(),
-      ...(auth ? { Authorization: auth } : {}),
+      ...(token ? { Authorization: token } : {}),
     },
     signal: AbortSignal.timeout(2500),
   });
@@ -93,12 +94,13 @@ async function fetchMasterList(endpoint: string, clientId: string, role: string,
 }
 
 async function fetchSearch(endpoint: string, queryParam: string, token: string, clientId: string, role: string, auth?: string): Promise<MasterItem[]> {
+  const authToken = auth || process.env.AUTH_TOKEN;
   const url = `${APP_EDUCATION_URL}${endpoint}?${queryParam || "q"}=${encodeURIComponent(token)}`;
   const res = await fetch(url, {
     headers: {
       "X-Client-Id": clientId,
       "X-User-Role": role.toUpperCase(),
-      ...(auth ? { Authorization: auth } : {}),
+      ...(authToken ? { Authorization: authToken } : {}),
     },
     signal: AbortSignal.timeout(2500),
   });
